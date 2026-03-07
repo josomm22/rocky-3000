@@ -36,11 +36,15 @@ void app_main(void)
     Touch_Init();
     LVGL_Init();
 
+    /* Black background */
+    lv_obj_set_style_bg_color(lv_scr_act(), lv_color_black(), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(lv_scr_act(), LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
+
     /* Create centered label on the active screen */
     label = lv_label_create(lv_scr_act());
     lv_label_set_text(label, "Hello World!");
     lv_obj_set_style_text_font(label, &lv_font_montserrat_32, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_color(label, lv_color_white(), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(label, lv_color_make(220, 220, 220), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
 
     /* Toggle text every 5 seconds via LVGL timer (runs in main loop, thread-safe) */

@@ -83,7 +83,7 @@ void LVGL_Init(void)
     disp_drv.hor_res = EXAMPLE_LCD_H_RES; // physical horizontal: 480
     disp_drv.ver_res = EXAMPLE_LCD_V_RES; // physical vertical:   640
     disp_drv.sw_rotate = 1;
-    disp_drv.rotated = LV_DISP_ROT_90;
+    disp_drv.rotated = LV_DISP_ROT_270;
     disp_drv.flush_cb = example_lvgl_flush_cb;
     disp_drv.draw_buf = &disp_buf;
     disp_drv.user_data = panel_handle;
