@@ -1,0 +1,18 @@
+idf_component_register(
+    SRCS "main.c"
+         "LCD_Driver/ST7701S.c"
+         "LVGL_Driver/LVGL_Driver.c"
+         "Touch_Driver/GT911.c"
+         "Touch_Driver/esp_lcd_touch/esp_lcd_touch.c"
+         "I2C_Driver/I2C_Driver.c"
+         "EXIO/TCA9554PWR.c"
+         "Buzzer/Buzzer.c"
+    INCLUDE_DIRS "."
+                 "LCD_Driver"
+                 "LVGL_Driver"
+                 "Touch_Driver"
+                 "Touch_Driver/esp_lcd_touch"
+                 "I2C_Driver"
+                 "EXIO"
+                 "Buzzer"
+)

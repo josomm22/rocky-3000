@@ -1,0 +1,21 @@
+menu "Display Configuration"
+    config EXAMPLE_DOUBLE_FB
+        bool "Use double Frame Buffer"
+        default n
+        help
+            Enable this option, driver will allocate two frame buffers.
+
+    config EXAMPLE_USE_BOUNCE_BUFFER
+        depends on !EXAMPLE_DOUBLE_FB
+        bool "Use bounce buffer"
+        default y
+        help
+            Enable bounce buffer mode for higher PCLK frequency at cost of CPU.
+
+    config EXAMPLE_AVOID_TEAR_EFFECT_WITH_SEM
+        depends on !EXAMPLE_DOUBLE_FB
+        bool "Avoid tearing effect"
+        default y
+        help
+            Use a pair of semaphores to avoid screen tearing.
+endmenu
