@@ -22,7 +22,7 @@ GBWUI is an embedded application running on an ESP32-S3 that provides **grind-by
 | Grinder Control       | Solid-State Relay (SSR), active HIGH                                   |
 | Onboard extras        | QMI8658 IMU, PCF85063 RTC, TCA9554 GPIO expander, SD card slot, buzzer |
 | Development Toolchain | PlatformIO                                                             |
-| UI Framework          | LVGL **8.4.0** (resolved from `^8.3.10`)                               |
+| UI Framework          | LVGL **9.x**                                                           |
 
 ---
 
@@ -32,9 +32,9 @@ GBWUI is an embedded application running on an ESP32-S3 that provides **grind-by
 
 | Signal      | GPIO | Notes                  |
 | ----------- | ---- | ---------------------- |
-| HX711 DATA  | 33   | Free GPIO              |
-| HX711 CLK   | 34   | Free GPIO              |
-| SSR control | 35   | Free GPIO, active HIGH |
+| HX711 DATA  | 43   | Free GPIO              |
+| HX711 CLK   | 44   | Free GPIO              |
+| SSR control | 33   | Free GPIO, active HIGH |
 
 ---
 
@@ -448,21 +448,6 @@ build_flags =
 monitor_speed = 115200
 monitor_filters = esp32_exception_decoder
 ```
-
-### Display Driver Notes
-
-- ST7701 RGB parallel interface via `esp_lcd_rgb_panel` (esp-idf 5.1.x)
-- Clock source: `LCD_CLK_SRC_PLL160M`
-- **Single** frame buffer allocated in PSRAM (`flags.fb_in_psram = 1`)
-- `num_fbs` and `bounce_buffer_size_px` fields do **not** exist in esp-idf 5.1.x
-- LVGL draw buffer: half-screen (`LCD_WIDTH * LCD_HEIGHT / 2` pixels) in PSRAM
-- RGB data pin order: D0=NC(B0), D1–D4=B1–B4, D5–D10=G0–G5, D11–D15=R1–R5
-
-### Touch Driver Notes
-
-- GT911 on I2C (GPIO7/15), INT on GPIO16, RST via TCA9554 EXIO2
-- I2C address: 0x5D (INT held LOW at boot)
-- LVGL input device registered via `lv_indev_drv_t`
 
 ### LVGL Config Notes
 

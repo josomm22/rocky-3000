@@ -7,6 +7,11 @@ idf_component_register(
          "I2C_Driver/I2C_Driver.c"
          "EXIO/TCA9554PWR.c"
          "Buzzer/Buzzer.c"
+         "ui/screen_main.c"
+         "ui/screen_settings.c"
+         "ui/screen_calibration.c"
+         "ui/screen_wifi.c"
+         "ui/screen_ota.c"
     INCLUDE_DIRS "."
                  "LCD_Driver"
                  "LVGL_Driver"
@@ -15,4 +20,5 @@ idf_component_register(
                  "I2C_Driver"
                  "EXIO"
                  "Buzzer"
+                 "ui"
 )
