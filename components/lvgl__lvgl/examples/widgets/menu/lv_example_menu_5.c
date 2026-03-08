@@ -1,35 +1,35 @@
 #include "../../lv_examples.h"
 #if LV_USE_MENU && LV_USE_MSGBOX && LV_BUILD_EXAMPLES
 
-enum {
+typedef enum {
     LV_MENU_ITEM_BUILDER_VARIANT_1,
     LV_MENU_ITEM_BUILDER_VARIANT_2
-};
-typedef uint8_t lv_menu_builder_variant_t;
+} lv_menu_builder_variant_t;
 
 static void back_event_handler(lv_event_t * e);
 static void switch_handler(lv_event_t * e);
 lv_obj_t * root_page;
 static lv_obj_t * create_text(lv_obj_t * parent, const char * icon, const char * txt,
-                                        lv_menu_builder_variant_t builder_variant);
+                              lv_menu_builder_variant_t builder_variant);
 static lv_obj_t * create_slider(lv_obj_t * parent,
-                                   const char * icon, const char * txt, int32_t min, int32_t max, int32_t val);
+                                const char * icon, const char * txt, int32_t min, int32_t max, int32_t val);
 static lv_obj_t * create_switch(lv_obj_t * parent,
-                                   const char * icon, const char * txt, bool chk);
+                                const char * icon, const char * txt, bool chk);
 
 void lv_example_menu_5(void)
 {
-    lv_obj_t * menu = lv_menu_create(lv_scr_act());
+    lv_obj_t * menu = lv_menu_create(lv_screen_active());
 
     lv_color_t bg_color = lv_obj_get_style_bg_color(menu, 0);
     if(lv_color_brightness(bg_color) > 127) {
         lv_obj_set_style_bg_color(menu, lv_color_darken(lv_obj_get_style_bg_color(menu, 0), 10), 0);
-    }else{
+    }
+    else {
         lv_obj_set_style_bg_color(menu, lv_color_darken(lv_obj_get_style_bg_color(menu, 0), 50), 0);
     }
-    lv_menu_set_mode_root_back_btn(menu, LV_MENU_ROOT_BACK_BTN_ENABLED);
+    lv_menu_set_mode_root_back_button(menu, LV_MENU_ROOT_BACK_BUTTON_ENABLED);
     lv_obj_add_event_cb(menu, back_event_handler, LV_EVENT_CLICKED, menu);
-    lv_obj_set_size(menu, lv_disp_get_hor_res(NULL), lv_disp_get_ver_res(NULL));
+    lv_obj_set_size(menu, lv_display_get_horizontal_resolution(NULL), lv_display_get_vertical_resolution(NULL));
     lv_obj_center(menu);
 
     lv_obj_t * cont;
@@ -64,8 +64,10 @@ void lv_example_menu_5(void)
     lv_obj_t * sub_legal_info_page = lv_menu_page_create(menu, NULL);
     lv_obj_set_style_pad_hor(sub_legal_info_page, lv_obj_get_style_pad_left(lv_menu_get_main_header(menu), 0), 0);
     section = lv_menu_section_create(sub_legal_info_page);
-    for(uint32_t i=0; i<15; i++){
-        create_text(section, NULL, "This is a long long long long long long long long long text, if it is long enough it may scroll.", LV_MENU_ITEM_BUILDER_VARIANT_1);
+    for(uint32_t i = 0; i < 15; i++) {
+        create_text(section, NULL,
+                    "This is a long long long long long long long long long text, if it is long enough it may scroll.",
+                    LV_MENU_ITEM_BUILDER_VARIANT_1);
     }
 
     lv_obj_t * sub_about_page = lv_menu_page_create(menu, NULL);
@@ -104,7 +106,8 @@ void lv_example_menu_5(void)
 
     lv_menu_set_sidebar_page(menu, root_page);
 
-    lv_event_send(lv_obj_get_child(lv_obj_get_child(lv_menu_get_cur_sidebar_page(menu), 0), 0), LV_EVENT_CLICKED, NULL);
+    lv_obj_send_event(lv_obj_get_child(lv_obj_get_child(lv_menu_get_cur_sidebar_page(menu), 0), 0), LV_EVENT_CLICKED,
+                      NULL);
 }
 
 static void back_event_handler(lv_event_t * e)
@@ -112,9 +115,11 @@ static void back_event_handler(lv_event_t * e)
     lv_obj_t * obj = lv_event_get_target(e);
     lv_obj_t * menu = lv_event_get_user_data(e);
 
-    if(lv_menu_back_btn_is_root(menu, obj)) {
-        lv_obj_t * mbox1 = lv_msgbox_create(NULL, "Hello", "Root back btn click.", NULL, true);
-        lv_obj_center(mbox1);
+    if(lv_menu_back_button_is_root(menu, obj)) {
+        lv_obj_t * mbox1 = lv_msgbox_create(NULL);
+        lv_msgbox_add_title(mbox1, "Hello");
+        lv_msgbox_add_text(mbox1, "Root back btn click.");
+        lv_msgbox_add_close_button(mbox1);
     }
 }
 
@@ -127,8 +132,10 @@ static void switch_handler(lv_event_t * e)
         if(lv_obj_has_state(obj, LV_STATE_CHECKED)) {
             lv_menu_set_page(menu, NULL);
             lv_menu_set_sidebar_page(menu, root_page);
-            lv_event_send(lv_obj_get_child(lv_obj_get_child(lv_menu_get_cur_sidebar_page(menu), 0), 0), LV_EVENT_CLICKED, NULL);
-        }else {
+            lv_obj_send_event(lv_obj_get_child(lv_obj_get_child(lv_menu_get_cur_sidebar_page(menu), 0), 0), LV_EVENT_CLICKED,
+                              NULL);
+        }
+        else {
             lv_menu_set_sidebar_page(menu, NULL);
             lv_menu_clear_history(menu); /* Clear history because we will be showing the root page later */
             lv_menu_set_page(menu, root_page);
@@ -137,7 +144,7 @@ static void switch_handler(lv_event_t * e)
 }
 
 static lv_obj_t * create_text(lv_obj_t * parent, const char * icon, const char * txt,
-                                        lv_menu_builder_variant_t builder_variant)
+                              lv_menu_builder_variant_t builder_variant)
 {
     lv_obj_t * obj = lv_menu_cont_create(parent);
 
@@ -145,8 +152,8 @@ static lv_obj_t * create_text(lv_obj_t * parent, const char * icon, const char *
     lv_obj_t * label = NULL;
 
     if(icon) {
-        img = lv_img_create(obj);
-        lv_img_set_src(img, icon);
+        img = lv_image_create(obj);
+        lv_image_set_src(img, icon);
     }
 
     if(txt) {
@@ -164,7 +171,8 @@ static lv_obj_t * create_text(lv_obj_t * parent, const char * icon, const char *
     return obj;
 }
 
-static lv_obj_t * create_slider(lv_obj_t * parent, const char * icon, const char * txt, int32_t min, int32_t max, int32_t val)
+static lv_obj_t * create_slider(lv_obj_t * parent, const char * icon, const char * txt, int32_t min, int32_t max,
+                                int32_t val)
 {
     lv_obj_t * obj = create_text(parent, icon, txt, LV_MENU_ITEM_BUILDER_VARIANT_2);
 
@@ -191,4 +199,3 @@ static lv_obj_t * create_switch(lv_obj_t * parent, const char * icon, const char
 }
 
 #endif
-

@@ -12,6 +12,17 @@
 
 static lv_obj_t *status_label;
 static lv_obj_t *slider_label;
+static lv_obj_t *fps_label;
+
+/* --- FPS timer --- */
+static void fps_timer_cb(lv_timer_t *t)
+{
+    static uint32_t last_count = 0;
+    uint32_t cur = lvgl_flush_count;
+    uint32_t fps = cur - last_count; /* called every 1000ms */
+    last_count = cur;
+    lv_label_set_text_fmt(fps_label, "%" LV_PRIu32 " FPS", fps);
+}
 
 /* --- Button callbacks --- */
 static void btn1_event_cb(lv_event_t *e)
@@ -41,7 +52,7 @@ static void slider_event_cb(lv_event_t *e)
 static lv_obj_t *create_button(lv_obj_t *parent, const char *text,
                                lv_event_cb_t cb, int x_ofs, int y_ofs)
 {
-    lv_obj_t *btn = lv_btn_create(parent);
+    lv_obj_t *btn = lv_button_create(parent);
     lv_obj_set_size(btn, 180, 70);
     lv_obj_align(btn, LV_ALIGN_CENTER, x_ofs, y_ofs);
     lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
@@ -114,10 +125,18 @@ void app_main(void)
         lv_obj_align(tick, LV_ALIGN_BOTTOM_MID, x, -32);
     }
 
+    /* --- FPS counter label (bottom-right) --- */
+    fps_label = lv_label_create(scr);
+    lv_label_set_text(fps_label, "-- FPS");
+    lv_obj_set_style_text_font(fps_label, &lv_font_montserrat_14, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(fps_label, lv_color_make(100, 100, 100), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_align(fps_label, LV_ALIGN_BOTTOM_RIGHT, -8, -8);
+    lv_timer_create(fps_timer_cb, 1000, NULL);
+
     /* Main LVGL loop */
     while (1)
     {
-        vTaskDelay(pdMS_TO_TICKS(10));
         lv_timer_handler();
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 }

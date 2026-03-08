@@ -13,9 +13,14 @@ extern "C" {
 /*********************
  *      INCLUDES
  *********************/
-#include "snapshot/lv_example_snapshot.h"
-#include "monkey/lv_example_monkey.h"
+#include "file_explorer/lv_example_file_explorer.h"
+#include "fragment/lv_example_fragment.h"
 #include "gridnav/lv_example_gridnav.h"
+#include "ime/lv_example_ime_pinyin.h"
+#include "imgfont/lv_example_imgfont.h"
+#include "monkey/lv_example_monkey.h"
+#include "observer/lv_example_observer.h"
+#include "snapshot/lv_example_snapshot.h"
 
 /*********************
  *      DEFINES
@@ -37,4 +42,4 @@ extern "C" {
 } /*extern "C"*/
 #endif
 
-#endif /*LV_EX_OTHERS_H*/
+#endif /*LV_EXAMPLE_OTHERS_H*/

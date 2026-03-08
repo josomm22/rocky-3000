@@ -1,112 +1,135 @@
 #include "LVGL_Driver.h"
 
 static const char *LVGL_TAG = "LVGL";
-lv_disp_draw_buf_t disp_buf; // contains internal graphic buffer(s) called draw buffer(s)
-lv_disp_drv_t disp_drv;      // contains callback functions
 
-lv_indev_drv_t indev_drv;
-esp_timer_handle_t lvgl_tick_timer = NULL;
+lv_display_t *disp = NULL;
+lv_indev_t *indev = NULL;
 
 static void *buf1 = NULL;
 static void *buf2 = NULL;
+/* Scratch buffer for software rotation (physical panel size) */
+static void *rot_buf = NULL;
 
-void example_lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_map)
+/* Counts flushes completed; read by FPS timer in main */
+volatile uint32_t lvgl_flush_count = 0;
+
+void example_lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 {
-    esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t)drv->user_data;
-    int offsetx1 = area->x1;
-    int offsetx2 = area->x2;
-    int offsety1 = area->y1;
-    int offsety2 = area->y2;
+    esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t)lv_display_get_user_data(disp);
+
+    lv_display_rotation_t rotation = lv_display_get_rotation(disp);
+    const uint8_t *src = px_map;
+
+    /* Dirty tile dimensions in logical coordinates */
+    int32_t lw = area->x2 - area->x1 + 1;
+    int32_t lh = area->y2 - area->y1 + 1;
+
+    /* Physical panel target rectangle (default: logical == physical, no rotation) */
+    int32_t px1 = area->x1, py1 = area->y1;
+    int32_t px2 = area->x2 + 1, py2 = area->y2 + 1; /* exclusive end */
+
+    if (rotation != LV_DISPLAY_ROTATION_0)
+    {
+        lv_color_format_t cf = lv_display_get_color_format(disp);
+        /* In PARTIAL mode the stride covers only the tile width, not the full display */
+        uint32_t src_stride = lv_draw_buf_width_to_stride(lw, cf);
+        /* ROT_270 output: physical-width = lh, physical-height = lw */
+        uint32_t dst_stride = lv_draw_buf_width_to_stride(lh, cf);
+        lv_draw_sw_rotate(px_map, rot_buf, lw, lh, src_stride, dst_stride, rotation, cf);
+        src = (const uint8_t *)rot_buf;
+
+        /* Coordinate mapping for ROT_270 (90° CCW):
+         *   logical (lx, ly)  →  physical (HRES-1-ly, lx)
+         *   tile (x1..x2, y1..y2) →:
+         *     phys_x ∈ [HRES-1-y2 .. HRES-1-y1]  (x_end = HRES-y1, exclusive)
+         *     phys_y ∈ [x1 .. x2]                  (y_end = x2+1,    exclusive)
+         */
+        px1 = EXAMPLE_LCD_H_RES - 1 - area->y2;
+        py1 = area->x1;
+        px2 = EXAMPLE_LCD_H_RES - area->y1;
+        py2 = area->x2 + 1;
+    }
+
 #if CONFIG_EXAMPLE_AVOID_TEAR_EFFECT_WITH_SEM
     xSemaphoreGive(sem_gui_ready);
     xSemaphoreTake(sem_vsync_end, portMAX_DELAY);
 #endif
-    // pass the draw buffer to the driver
-    esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, color_map);
-    lv_disp_flush_ready(drv);
+    esp_lcd_panel_draw_bitmap(panel_handle, px1, py1, px2, py2, src);
+    lvgl_flush_count++;
+    lv_display_flush_ready(disp);
 }
 
 void example_increase_lvgl_tick(void *arg)
 {
-    /* Tell LVGL how many milliseconds has elapsed */
     lv_tick_inc(EXAMPLE_LVGL_TICK_PERIOD_MS);
 }
 
-/*Read the touchpad*/
-void example_touchpad_read(lv_indev_drv_t *drv, lv_indev_data_t *data)
+void example_touchpad_read(lv_indev_t *indev, lv_indev_data_t *data)
 {
     uint16_t touchpad_x[1] = {0};
     uint16_t touchpad_y[1] = {0};
     uint8_t touchpad_cnt = 0;
 
-    /* Read touch controller data */
-    esp_lcd_touch_read_data(drv->user_data);
+    esp_lcd_touch_handle_t tp_handle = (esp_lcd_touch_handle_t)lv_indev_get_user_data(indev);
 
-    /* Get coordinates */
-    bool touchpad_pressed = esp_lcd_touch_get_coordinates(drv->user_data, touchpad_x, touchpad_y, NULL, &touchpad_cnt, 1);
+    esp_lcd_touch_read_data(tp_handle);
+    bool touchpad_pressed = esp_lcd_touch_get_coordinates(tp_handle, touchpad_x, touchpad_y, NULL, &touchpad_cnt, 1);
 
     if (touchpad_pressed && touchpad_cnt > 0)
     {
         data->point.x = touchpad_x[0];
         data->point.y = touchpad_y[0];
-        data->state = LV_INDEV_STATE_PR;
-        // ESP_LOGI(LVGL_TAG, "X=%u Y=%u", data->point.x, data->point.y);
+        data->state = LV_INDEV_STATE_PRESSED;
     }
     else
     {
-        data->state = LV_INDEV_STATE_REL;
+        data->state = LV_INDEV_STATE_RELEASED;
     }
 }
+
 void LVGL_Init(void)
 {
     ESP_LOGI(LVGL_TAG, "Initialize LVGL library");
     lv_init();
-#if CONFIG_EXAMPLE_DOUBLE_FB
-    ESP_LOGI(LVGL_TAG, "Use frame buffers as LVGL draw buffers");
-    ESP_ERROR_CHECK(esp_lcd_rgb_panel_get_frame_buffer(panel_handle, 2, &buf1, &buf2));
-    // initialize LVGL draw buffers
-    lv_disp_draw_buf_init(&disp_buf, buf1, buf2, EXAMPLE_LCD_H_RES * EXAMPLE_LCD_V_RES);
-#else
-    ESP_LOGI(LVGL_TAG, "Allocate separate LVGL draw buffers from PSRAM");
-    buf1 = heap_caps_malloc(EXAMPLE_LCD_H_RES * EXAMPLE_LCD_V_RES, MALLOC_CAP_SPIRAM);
-    assert(buf1);
-    buf2 = heap_caps_malloc(EXAMPLE_LCD_H_RES * EXAMPLE_LCD_V_RES, MALLOC_CAP_SPIRAM);
-    assert(buf2);
-    // initialize LVGL draw buffers
-    lv_disp_draw_buf_init(&disp_buf, buf1, buf2, EXAMPLE_LCD_H_RES * EXAMPLE_LCD_V_RES);
-#endif // CONFIG_EXAMPLE_DOUBLE_FB
 
-    ESP_LOGI(LVGL_TAG, "Register display driver to LVGL (landscape, 90° software rotation)");
-    lv_disp_drv_init(&disp_drv);
-    /* Physical panel is 480x640 (portrait). Enable LVGL software rotation so
-       the logical coordinate space becomes 640x480 (landscape). */
-    disp_drv.hor_res = EXAMPLE_LCD_H_RES; // physical horizontal: 480
-    disp_drv.ver_res = EXAMPLE_LCD_V_RES; // physical vertical:   640
-    disp_drv.sw_rotate = 1;
-    disp_drv.rotated = LV_DISP_ROT_270;
-    disp_drv.flush_cb = example_lvgl_flush_cb;
-    disp_drv.draw_buf = &disp_buf;
-    disp_drv.user_data = panel_handle;
-#if CONFIG_EXAMPLE_DOUBLE_FB
-    disp_drv.full_refresh = true; // the full_refresh mode can maintain the synchronization between the two frame buffers
-#endif
-    lv_disp_t *disp = lv_disp_drv_register(&disp_drv);
+    /* Create display with PHYSICAL dimensions */
+    ESP_LOGI(LVGL_TAG, "Create LVGL display (physical 480x640)");
+    disp = lv_display_create(EXAMPLE_LCD_H_RES, EXAMPLE_LCD_V_RES);
+    lv_display_set_flush_cb(disp, example_lvgl_flush_cb);
+    lv_display_set_user_data(disp, panel_handle);
+
+    /* Set rotation BEFORE set_buffers so set_buffers captures the correct
+     * logical width (640) and stride (1280 bytes/row) for the landscape buffer. */
+    lv_display_set_rotation(disp, LV_DISPLAY_ROTATION_270);
+
+    ESP_LOGI(LVGL_TAG, "Allocate LVGL tile buffers in internal SRAM");
+/* Partial-mode tile: 40 logical rows × 640 logical cols × 2 bytes = 51200 bytes.
+ * Internal SRAM is ~6× faster than PSRAM and avoids cache-miss penalties from
+ * the non-sequential writes that rotation produces. */
+#define LVGL_TILE_ROWS 40
+    size_t tile_size = (size_t)EXAMPLE_LCD_V_RES * LVGL_TILE_ROWS * sizeof(lv_color_t);
+    buf1 = heap_caps_malloc(tile_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    assert(buf1);
+    rot_buf = heap_caps_malloc(tile_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    assert(rot_buf);
+    /* buf2 not needed; single-buffer partial mode is sufficient */
+
+    /* PARTIAL mode: LVGL renders only dirty rectangles, flush_cb is called per tile */
+    lv_display_set_buffers(disp, buf1, NULL, tile_size, LV_DISPLAY_RENDER_MODE_PARTIAL);
+
+    ESP_LOGI(LVGL_TAG, "Register touch input device");
+    indev = lv_indev_create();
+    lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
+    lv_indev_set_display(indev, disp);
+    lv_indev_set_read_cb(indev, example_touchpad_read);
+    lv_indev_set_user_data(indev, tp);
 
     ESP_LOGI(LVGL_TAG, "Install LVGL tick timer");
-    // Tick interface for LVGL (using esp_timer to generate 2ms periodic event)
     const esp_timer_create_args_t lvgl_tick_timer_args = {
         .callback = &example_increase_lvgl_tick,
-        .name = "lvgl_tick"};
-
-    /********************* LVGL *********************/
-    ESP_LOGI(LVGL_TAG, "Register display indev to LVGL");
-    lv_indev_drv_init(&indev_drv);
-    indev_drv.type = LV_INDEV_TYPE_POINTER;
-    indev_drv.disp = disp;
-    indev_drv.read_cb = example_touchpad_read;
-    indev_drv.user_data = tp;
-    lv_indev_drv_register(&indev_drv);
-
+        .name = "lvgl_tick",
+    };
+    esp_timer_handle_t lvgl_tick_timer = NULL;
     ESP_ERROR_CHECK(esp_timer_create(&lvgl_tick_timer_args, &lvgl_tick_timer));
     ESP_ERROR_CHECK(esp_timer_start_periodic(lvgl_tick_timer, EXAMPLE_LVGL_TICK_PERIOD_MS * 1000));
 }
