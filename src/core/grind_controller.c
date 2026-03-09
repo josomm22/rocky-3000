@@ -90,8 +90,9 @@ static void hx711_task(void *arg)
 
 /* ── Module state ───────────────────────────────────────────── */
 
-static grind_state_t  s_state   = GRIND_IDLE;
-static float          s_target  = 18.0f;
+static float          s_cal_factor = 1.0f;
+static grind_state_t  s_state      = GRIND_IDLE;
+static float          s_target     = 18.0f;
 static float          s_offset  = DEFAULT_OFFSET_G;
 static float          s_weight  = 0.0f;   /* snapshot read by UI / grind logic */
 static float          s_result  = 0.0f;
@@ -258,6 +259,32 @@ float         grind_ctrl_get_offset(void) { return s_offset; }
 void grind_ctrl_set_offset(float g)
 {
     s_offset = clampf(g, OFFSET_MIN_G, OFFSET_MAX_G);
+}
+
+float grind_ctrl_get_cal_factor(void) { return s_cal_factor; }
+
+void grind_ctrl_set_cal_factor(float f)
+{
+    s_cal_factor = clampf(f, 0.1f, 10.0f);
+    /* TODO (real mode): persist to NVS, apply to hx711_task */
+}
+
+float grind_ctrl_get_live_weight(void)
+{
+#if GRIND_DEMO_MODE
+    return s_weight;   /* 0.0 when idle; rises during a grind */
+#else
+    return (float)s_latest_weight;
+#endif
+}
+
+bool grind_ctrl_is_demo(void)
+{
+#if GRIND_DEMO_MODE
+    return true;
+#else
+    return false;
+#endif
 }
 
 void grind_ctrl_ack_done(void)
