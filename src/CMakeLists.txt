@@ -7,6 +7,7 @@ idf_component_register(
          "I2C_Driver/I2C_Driver.c"
          "EXIO/TCA9554PWR.c"
          "Buzzer/Buzzer.c"
+         "core/grind_controller.c"
          "ui/screen_main.c"
          "ui/screen_settings.c"
          "ui/screen_calibration.c"
@@ -22,6 +23,7 @@ idf_component_register(
                  "I2C_Driver"
                  "EXIO"
                  "Buzzer"
+                 "core"
                  "ui"
     REQUIRES esp_wifi esp_netif nvs_flash esp_event esp_http_server
 )

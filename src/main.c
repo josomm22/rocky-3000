@@ -14,6 +14,7 @@
 #include "screen_main.h"
 #include "screen_wifi.h"
 #include "display_manager.h"
+#include "grind_controller.h"
 
 /* ── Entry point ────────────────────────────────────────────── */
 void app_main(void)
@@ -26,6 +27,7 @@ void app_main(void)
 
     disp_mgr_init();    /* apply saved brightness, start sleep timer */
     wifi_autoconnect(); /* connect in background using saved NVS creds */
+    grind_ctrl_init();  /* SSR safe-low + demo poll timer (paused) */
 
     screen_main_load();
 
