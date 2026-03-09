@@ -25,5 +25,5 @@ idf_component_register(
                  "Buzzer"
                  "core"
                  "ui"
-    REQUIRES esp_wifi esp_netif nvs_flash esp_event esp_http_server
+    REQUIRES esp_wifi esp_netif nvs_flash esp_event esp_http_server app_update
 )
