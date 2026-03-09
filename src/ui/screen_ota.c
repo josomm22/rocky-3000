@@ -27,9 +27,9 @@ void screen_ota_load(void)
 
     /* Back button */
     lv_obj_t *btn_back = lv_button_create(scr);
-    lv_obj_set_size(btn_back, 48, 48);
+    lv_obj_set_size(btn_back, 55, 55);
     lv_obj_align(btn_back, LV_ALIGN_TOP_LEFT, 12, 12);
-    lv_obj_set_style_radius(btn_back, 24, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_radius(btn_back, 28, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_color(btn_back, COL_BG, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_color(btn_back, COL_SURFACE, LV_PART_MAIN | LV_STATE_PRESSED);
     lv_obj_set_style_bg_opa(btn_back, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -39,7 +39,7 @@ void screen_ota_load(void)
 
     lv_obj_t *lbl_back = lv_label_create(btn_back);
     lv_label_set_text(lbl_back, LV_SYMBOL_LEFT);
-    lv_obj_set_style_text_font(lbl_back, &lv_font_montserrat_24,
+    lv_obj_set_style_text_font(lbl_back, &lv_font_montserrat_32,
                                LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_color(lbl_back, COL_TEXT, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_center(lbl_back);
@@ -47,7 +47,7 @@ void screen_ota_load(void)
     /* Title */
     lv_obj_t *title = lv_label_create(scr);
     lv_label_set_text(title, "Firmware Update");
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_24,
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_32,
                                LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_color(title, COL_TEXT, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 22);
@@ -55,7 +55,7 @@ void screen_ota_load(void)
     /* Divider */
     lv_obj_t *div = lv_obj_create(scr);
     lv_obj_set_size(div, SCR_W - 20, 1);
-    lv_obj_align(div, LV_ALIGN_TOP_MID, 0, 60);
+    lv_obj_align(div, LV_ALIGN_TOP_MID, 0, 76);
     lv_obj_set_style_bg_color(div, COL_SURFACE, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_opa(div, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_border_width(div, 0, LV_PART_MAIN | LV_STATE_DEFAULT);

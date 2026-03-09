@@ -248,6 +248,30 @@ void screen_main_load(void)
                                        LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_center(s_lbl_grind);
 
+    /* ── Purge button (bottom-left) ─────────────────────────── */
+    lv_obj_t *btn_purge = lv_button_create(scr);
+    lv_obj_set_size(btn_purge, 117, 90);
+    lv_obj_align(btn_purge, LV_ALIGN_BOTTOM_LEFT, 20, -20);
+    lv_obj_set_style_radius(btn_purge, 14, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(btn_purge, lv_color_hex(0x8b0000),
+                              LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(btn_purge, lv_color_hex(0xc62828),
+                              LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(btn_purge, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_color(btn_purge, lv_color_hex(0xc62828),
+                                  LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(btn_purge, 2, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_opa(btn_purge, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_shadow_width(btn_purge, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    lv_obj_t *lbl_purge = lv_label_create(btn_purge);
+    lv_label_set_text(lbl_purge, "PURGE");
+    lv_obj_set_style_text_font(lbl_purge, &lv_font_montserrat_24,
+                               LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(lbl_purge, lv_color_white(),
+                                LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_center(lbl_purge);
+
     rebuild_preset_row();
 
     lv_scr_load(scr);
