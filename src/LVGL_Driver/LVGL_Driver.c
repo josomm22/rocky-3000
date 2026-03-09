@@ -1,4 +1,5 @@
 #include "LVGL_Driver.h"
+#include "display_manager.h"
 
 static const char *LVGL_TAG = "LVGL";
 
@@ -77,6 +78,13 @@ void example_touchpad_read(lv_indev_t *indev, lv_indev_data_t *data)
 
     if (touchpad_pressed && touchpad_cnt > 0)
     {
+        /* Wake the screen on first touch; consume the event so it doesn't
+         * trigger any UI element while the user just wanted to wake. */
+        if (disp_mgr_intercept_touch())
+        {
+            data->state = LV_INDEV_STATE_RELEASED;
+            return;
+        }
         data->point.x = touchpad_x[0];
         data->point.y = touchpad_y[0];
         data->state = LV_INDEV_STATE_PRESSED;

@@ -13,6 +13,7 @@ idf_component_register(
          "ui/screen_wifi.c"
          "ui/wifi_portal.c"
          "ui/screen_ota.c"
+         "ui/display_manager.c"
     INCLUDE_DIRS "."
                  "LCD_Driver"
                  "LVGL_Driver"

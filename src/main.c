@@ -13,6 +13,7 @@
 #include "lvgl.h"
 #include "screen_main.h"
 #include "screen_wifi.h"
+#include "display_manager.h"
 
 /* ── Entry point ────────────────────────────────────────────── */
 void app_main(void)
@@ -23,6 +24,7 @@ void app_main(void)
     Touch_Init();
     LVGL_Init();
 
+    disp_mgr_init();    /* apply saved brightness, start sleep timer */
     wifi_autoconnect(); /* connect in background using saved NVS creds */
 
     screen_main_load();
