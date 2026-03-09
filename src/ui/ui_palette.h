@@ -17,8 +17,8 @@
 
 /* ── Layout constants ───────────────────────────────────────── */
 #define PRESET_MAX 6
-#define PILL_W 106
-#define PILL_H 57
+#define PILL_W 127
+#define PILL_H 68
 #define PILL_RADIUS (PILL_H / 2)
 #define PILL_GAP 14
 #define SEL_FRAME_W (PILL_W + 10)

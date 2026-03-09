@@ -12,6 +12,7 @@
 #include "LVGL_Driver.h"
 #include "lvgl.h"
 #include "screen_main.h"
+#include "screen_wifi.h"
 
 /* ── Entry point ────────────────────────────────────────────── */
 void app_main(void)
@@ -21,6 +22,8 @@ void app_main(void)
     LCD_Init();
     Touch_Init();
     LVGL_Init();
+
+    wifi_autoconnect(); /* connect in background using saved NVS creds */
 
     screen_main_load();
 

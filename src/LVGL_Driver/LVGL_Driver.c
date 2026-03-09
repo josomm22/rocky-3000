@@ -110,7 +110,10 @@ void LVGL_Init(void)
     size_t tile_size = (size_t)EXAMPLE_LCD_V_RES * LVGL_TILE_ROWS * sizeof(lv_color_t);
     buf1 = heap_caps_malloc(tile_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
     assert(buf1);
-    rot_buf = heap_caps_malloc(tile_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    /* rot_buf is the software-rotation scratch buffer.  It is the SOURCE of a
+     * CPU memcpy into the RGB framebuffer (not DMA'd directly), so PSRAM is
+     * fine and avoids competing with the WiFi stack for internal SRAM. */
+    rot_buf = heap_caps_malloc(tile_size, MALLOC_CAP_SPIRAM);
     assert(rot_buf);
     /* buf2 not needed; single-buffer partial mode is sufficient */
 

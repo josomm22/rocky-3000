@@ -8,6 +8,7 @@
 #include "ui_palette.h"
 #include "screen_main.h"
 #include "screen_settings.h"
+#include "screen_wifi.h"
 
 /* ── Preset state (persists across reloads) ─────────────────── */
 static float s_weights[PRESET_MAX] = {18.0f, 21.0f};
@@ -21,6 +22,8 @@ static lv_obj_t *s_btn_add = NULL;
 static lv_obj_t *s_sel_frame = NULL;
 static lv_obj_t *s_btn_grind = NULL;
 static lv_obj_t *s_lbl_grind = NULL;
+static lv_obj_t *s_lbl_wifi = NULL;
+static lv_timer_t *s_wifi_poll_timer = NULL;
 
 /* ── Forward declarations ───────────────────────────────────── */
 static void rebuild_preset_row(void);
@@ -54,11 +57,39 @@ static void grind_cb(lv_event_t *e)
     /* TODO: start grind cycle */
 }
 
+static void wifi_icon_poll_cb(lv_timer_t *t)
+{
+    (void)t;
+    if (!s_lbl_wifi)
+        return;
+    lv_obj_set_style_text_color(s_lbl_wifi,
+                                screen_wifi_is_connected() ? COL_ACCENT : COL_TEXT_DIM,
+                                LV_PART_MAIN | LV_STATE_DEFAULT);
+}
+
+static void scr_delete_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_wifi_poll_timer)
+    {
+        lv_timer_delete(s_wifi_poll_timer);
+        s_wifi_poll_timer = NULL;
+    }
+    s_lbl_wifi = NULL;
+}
+
 static void settings_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED)
         return;
     screen_settings_load();
+}
+
+static void wifi_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED)
+        return;
+    screen_wifi_load();
 }
 
 /* ── Style helpers ──────────────────────────────────────────── */
@@ -126,7 +157,7 @@ static void rebuild_preset_row(void)
 
         lv_obj_t *lbl = lv_label_create(pill);
         lv_label_set_text(lbl, buf);
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_24,
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_32,
                                    LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_center(lbl);
 
@@ -150,7 +181,7 @@ static void rebuild_preset_row(void)
 
         lv_obj_t *plus = lv_label_create(s_btn_add);
         lv_label_set_text(plus, "+");
-        lv_obj_set_style_text_font(plus, &lv_font_montserrat_24,
+        lv_obj_set_style_text_font(plus, &lv_font_montserrat_32,
                                    LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_text_color(plus, COL_TEXT_DIM, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_center(plus);
@@ -167,12 +198,34 @@ void screen_main_load(void)
     lv_obj_set_style_bg_color(scr, COL_BG, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(scr, scr_delete_cb, LV_EVENT_DELETE, NULL);
+    /* ── WiFi status indicator (top-left) ───────────────────── */
+    lv_obj_t *btn_wifi = lv_button_create(scr);
+    lv_obj_set_size(btn_wifi, 72, 72);
+    lv_obj_align(btn_wifi, LV_ALIGN_TOP_LEFT, 12, 12);
+    lv_obj_set_style_radius(btn_wifi, 36, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(btn_wifi, COL_BG, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(btn_wifi, COL_SURFACE, LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(btn_wifi, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(btn_wifi, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_shadow_width(btn_wifi, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_add_event_cb(btn_wifi, wifi_cb, LV_EVENT_CLICKED, NULL);
 
+    lv_obj_t *lbl_wifi = lv_label_create(btn_wifi);
+    lv_label_set_text(lbl_wifi, LV_SYMBOL_WIFI);
+    lv_obj_set_style_text_font(lbl_wifi, &lv_font_montserrat_32,
+                               LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(lbl_wifi, COL_TEXT_DIM,
+                                LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_center(lbl_wifi);
+    s_lbl_wifi = lbl_wifi;
+    s_wifi_poll_timer = lv_timer_create(wifi_icon_poll_cb, 1000, NULL);
+    lv_timer_ready(s_wifi_poll_timer); /* fire immediately to set correct color */
     /* ── Settings gear (top-right) ─────────────────────────── */
     lv_obj_t *btn_gear = lv_button_create(scr);
-    lv_obj_set_size(btn_gear, 72, 72);
+    lv_obj_set_size(btn_gear, 108, 108);
     lv_obj_align(btn_gear, LV_ALIGN_TOP_RIGHT, -12, 12);
-    lv_obj_set_style_radius(btn_gear, 36, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_radius(btn_gear, 54, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_color(btn_gear, COL_BG, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_color(btn_gear, COL_SURFACE, LV_PART_MAIN | LV_STATE_PRESSED);
     lv_obj_set_style_bg_opa(btn_gear, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -182,7 +235,7 @@ void screen_main_load(void)
 
     lv_obj_t *lbl_gear = lv_label_create(btn_gear);
     lv_label_set_text(lbl_gear, LV_SYMBOL_SETTINGS);
-    lv_obj_set_style_text_font(lbl_gear, &lv_font_montserrat_32,
+    lv_obj_set_style_text_font(lbl_gear, &lv_font_montserrat_48,
                                LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_color(lbl_gear, COL_GEAR, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_center(lbl_gear);

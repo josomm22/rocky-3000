@@ -11,6 +11,7 @@ idf_component_register(
          "ui/screen_settings.c"
          "ui/screen_calibration.c"
          "ui/screen_wifi.c"
+         "ui/wifi_portal.c"
          "ui/screen_ota.c"
     INCLUDE_DIRS "."
                  "LCD_Driver"
@@ -21,4 +22,5 @@ idf_component_register(
                  "EXIO"
                  "Buzzer"
                  "ui"
+    REQUIRES esp_wifi esp_netif nvs_flash esp_event esp_http_server
 )
