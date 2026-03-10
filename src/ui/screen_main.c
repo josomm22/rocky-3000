@@ -10,6 +10,7 @@
 #include "screen_settings.h"
 #include "screen_wifi.h"
 #include "grind_controller.h"
+#include "grind_history.h"
 
 /* ── Preset state (persists across reloads) ─────────────────── */
 static float s_weights[PRESET_MAX] = {18.0f, 21.0f};
@@ -157,6 +158,7 @@ static void grind_poll_cb(lv_timer_t *t)
         lv_label_set_text(s_lbl_grind, buf);
         set_grinding_ui(false);
 
+        grind_history_record(s_weights[s_active], result);
         show_grind_toast(result, s_weights[s_active]);
 
         s_done_timer = lv_timer_create(done_reset_cb, 2000, NULL);

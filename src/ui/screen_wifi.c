@@ -30,6 +30,7 @@
 #include "screen_wifi.h"
 #include "screen_settings.h"
 #include "wifi_portal.h"
+#include "secrets.h"
 
 static const char *TAG = "screen_wifi";
 
@@ -141,6 +142,14 @@ void wifi_autoconnect(void)
         (nvs_get_str(h, "ssid", ssid, &ssid_len) == ESP_OK && ssid[0] != '\0');
     nvs_get_str(h, "password", password, &pass_len);
     nvs_close(h);
+
+    /* Fall back to compile-time defaults from secrets.h if NVS is empty */
+    if (!have_creds && DEFAULT_WIFI_SSID[0] != '\0')
+    {
+        strncpy(ssid, DEFAULT_WIFI_SSID, sizeof(ssid) - 1);
+        strncpy(password, DEFAULT_WIFI_PASSWORD, sizeof(password) - 1);
+        have_creds = true;
+    }
 
     if (!have_creds)
         return;

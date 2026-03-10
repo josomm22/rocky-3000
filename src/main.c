@@ -15,6 +15,8 @@
 #include "screen_wifi.h"
 #include "display_manager.h"
 #include "grind_controller.h"
+#include "grind_history.h"
+#include "web_server.h"
 
 /* ── Entry point ────────────────────────────────────────────── */
 void app_main(void)
@@ -27,7 +29,9 @@ void app_main(void)
 
     disp_mgr_init();    /* apply saved brightness, start sleep timer */
     wifi_autoconnect(); /* connect in background using saved NVS creds */
-    grind_ctrl_init();  /* SSR safe-low + demo poll timer (paused) */
+    grind_ctrl_init();      /* SSR safe-low + demo poll timer (paused) */
+    grind_history_init();   /* load shot history from NVS              */
+    web_server_start();     /* persistent HTTP server on port 80        */
 
     screen_main_load();
 
