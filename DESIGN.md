@@ -58,10 +58,10 @@ GBWUI is an embedded application running on an ESP32-S3 that provides **grind-by
 
 1. User taps a preset pill (highlights it with arc) then presses **GRIND**
 2. System auto-tares the scale
-3. SSR energised (GPIO35 HIGH) → grinder on
-4. Live weight shown inside the GRIND button; STOP button appears bottom-left
+3. SSR energised (GPIO33 HIGH) → grinder on
+4. Live weight shown inside the GRIND button; STOP button appears bottom-right
 5. When `live_weight >= (target_weight - pre_stop_offset)` → SSR de-energised
-6. Weight stabilises; final weight recorded
+6. Final weight recorded (+ simulated overshoot in demo mode)
 7. Button briefly shows final weight (~2 s), then resets to **GRIND**
 8. Post-grind toast displayed with result and offset adjustment
 
@@ -76,7 +76,7 @@ GBWUI is an embedded application running on an ESP32-S3 that provides **grind-by
 
 ### 4.5 Relay Control
 
-- GPIO35, active HIGH
+- GPIO33, active HIGH
 - Always LOW on boot, on any error, and when idle
 
 ---
@@ -89,9 +89,9 @@ GBWUI is an embedded application running on an ESP32-S3 that provides **grind-by
 
 ```
 ┌─────────────────────────────┐
-│                        [⚙]  │
+│  [wifi]                [⚙]  │  ← wifi icon top-left, gear top-right
 │                             │
-│   ◜18g◝  [21g]  [+]        │  ← selected preset has arc
+│   ◜18g◝  [21g]  [+]        │  ← selected preset has accent ring
 │   ◟   ◞                     │
 │                             │
 │        ╔═════════╗          │
@@ -100,6 +100,7 @@ GBWUI is an embedded application running on an ESP32-S3 that provides **grind-by
 │        ║         ║          │
 │        ╚═════════╝          │
 │                             │
+│  [PURGE]                    │  ← always visible bottom-left
 └─────────────────────────────┘
 ```
 
@@ -107,7 +108,7 @@ GBWUI is an embedded application running on an ESP32-S3 that provides **grind-by
 
 ```
 ┌─────────────────────────────┐
-│                        [⚙]  │
+│  [wifi]                [⚙]  │
 │                             │
 │   ◜18g◝  [21g]  [+]        │
 │   ◟   ◞                     │
@@ -118,7 +119,7 @@ GBWUI is an embedded application running on an ESP32-S3 that provides **grind-by
 │        ║         ║          │
 │        ╚═════════╝          │
 │                             │
-│  [STOP]                     │  ← appears bottom-left
+│  [PURGE]           [STOP]   │  ← STOP appears bottom-right
 └─────────────────────────────┘
 ```
 
@@ -130,11 +131,16 @@ GBWUI is an embedded application running on an ESP32-S3 that provides **grind-by
         ╚═════════╝
 ```
 
+- WiFi icon (top-left): tappable, navigates to WiFi screen; colour reflects connection state (accent = connected, dim = disconnected), polled every 1 s
+- PURGE button (bottom-left): always visible; triggers a 1500 ms SSR pulse; label changes to "PURGING" while active
+
 ### 5.2 Add Preset Flow (`[+]` tapped)
+
+> **Not yet implemented.** The `[+]` button exists and is shown when `count < PRESET_MAX` (6), but `add_preset_cb` is a TODO stub. The panel below is the intended design.
 
 ```
 ┌─────────────────────────────┐
-│                        [⚙]  │
+│  [wifi]                [⚙]  │
 │                             │
 │   ◜18g◝  [21g]             │  ← [+] hidden at max count
 │   ◟   ◞                     │
@@ -153,9 +159,11 @@ GBWUI is an embedded application running on an ESP32-S3 that provides **grind-by
 
 ### 5.3 Edit / Delete Preset Flow (long press on pill)
 
+> **Not yet implemented.** Intended design:
+
 ```
 ┌─────────────────────────────┐
-│                        [⚙]  │
+│  [wifi]                [⚙]  │
 │                             │
 │   ◜18g◝  [21g]  [+]        │
 │   ◟   ◞                     │
@@ -183,21 +191,19 @@ GBWUI is an embedded application running on an ESP32-S3 that provides **grind-by
 │                             │
 │  WiFi                  [>]  │  ← navigates to WiFi screen
 │                             │
-│  Pre-stop offset            │
-│  [ − ]   0.3 g   [ + ]      │  ← 0.1g steps
-│                             │
-│  Brightness                 │
-│  ░░░░░░░░░░▓▓▓▓▓▓  75%     │  ← slider
-│                             │
 │  Calibration           [>]  │
 │                             │
 │  Firmware Update       [>]  │
 │                             │
-│      [ Reset to defaults ]  │
+│  Brightness  ░░░░░░▓▓▓▓▓▓  │  ← slider (10–100%)
+│                             │
+│  Sleep after  [<] 10 min [>]│  ← options: Never/1/2/5/10/15/30/60 min
+│                             │
 └─────────────────────────────┘
 ```
 
-- All changes saved to NVS on back navigation
+- Brightness and sleep timeout saved to NVS immediately on change (namespace `disp_cfg`)
+- Pre-stop offset stepper and Reset to defaults are **not yet implemented**
 
 ### 5.5 WiFi Screen (full screen, slides in from right)
 
@@ -308,11 +314,10 @@ GBWUI is an embedded application running on an ESP32-S3 that provides **grind-by
 
 **Implementation:**
 
-- HTTP server runs in a dedicated FreeRTOS task on Core 0 (`ota_srv`, 6 KB stack)
-- Upload handled by Arduino `Update` library (`Update.begin` / `write` / `end`)
-- Progress communicated back to LVGL via `volatile` variables polled every 500 ms
-- Web page served from PROGMEM with XHR-based upload (no page reload)
-- Back button stops the server task cleanly
+- HTTP server (`ota_srv_task`, Core 0, priority 2) starts at boot and is always running
+- Upload handled by ESP-IDF `app_update` component (`esp_ota_begin` / `write` / `end`)
+- Progress communicated back to LVGL via `volatile` variables polled every 500 ms by a timer in `screen_ota`
+- Web page served inline from `web_server.c`; XHR-based upload (no page reload)
 
 ### 5.8 Toast Notifications
 
@@ -337,7 +342,7 @@ GBWUI is an embedded application running on an ESP32-S3 that provides **grind-by
 ╚══════════════════════════════╝  ╚══════════════════════════════╝
 ```
 
-- Toast system implemented in `ui_manager.cpp` (no separate widget file)
+- Toast system implemented inline in `screen_main.c` (no separate widget file)
 - Only one toast shown at a time; new toast replaces existing
 
 ---
@@ -350,38 +355,35 @@ GBWUI is an embedded application running on an ESP32-S3 that provides **grind-by
 │                                                          │
 │  Core 0                          Core 1                  │
 │  ┌─────────────┐                 ┌──────────────────┐    │
-│  │  hx711_task │──xQueueWeight──▶│   lvgl_task      │    │
-│  │  (prio 5)   │                 │   ui_logic       │    │
+│  │  hx711_task │──volatile f32──▶│   app_main loop  │    │
+│  │  (prio 5)   │  (real mode     │   lv_timer_handler│   │
+│  │  (real mode │   only)         │   grind poll_cb  │    │
+│  │   only)     │                 │   SSR control    │    │
 │  └─────────────┘                 └──────────────────┘    │
 │  ┌──────────────────┐                                    │
-│  │  grind_ctrl_task │◀──xEventGroupGrind──────────────── │
-│  │  (prio 5)        │                                    │
-│  └────────┬─────────┘                                    │
-│           │ GPIO35 (SSR)                                 │
-│  ┌──────────────────┐                                    │
-│  │  ota_srv_task    │  (spawned only when OTA screen      │
-│  │  (prio 2)        │   is open, Core 0)                 │
+│  │  ota_srv_task    │  (persistent, started at boot,     │
+│  │  (prio 2)        │   Core 0)                          │
 │  └──────────────────┘                                    │
 └──────────────────────────────────────────────────────────┘
 ```
 
+Grind control logic runs as an **LVGL timer** (`poll_cb`, 100 ms) on Core 1 inside the main loop — there is no separate `grind_ctrl_task`. SSR is driven directly from `poll_cb` via `gpio_set_level`. In demo mode (`GRIND_DEMO_MODE=1`, default) weight is simulated; no `hx711_task` is created.
+
 ### 6.1 Tasks
 
-| Task              | Core | Priority | Lifetime        | Responsibility                         |
-| ----------------- | ---- | -------- | --------------- | -------------------------------------- |
-| `hx711_task`      | 0    | 5        | Always          | Poll HX711, push readings to queue     |
-| `grind_ctrl_task` | 0    | 5        | Always          | Consume weight, control SSR, auto-tune |
-| `lvgl_task`       | 1    | 2        | Always          | LVGL tick + display flush              |
-| `ota_srv_task`    | 0    | 2        | OTA screen only | HTTP server, firmware write            |
+| Task           | Core | Priority | Lifetime   | Responsibility                                     |
+| -------------- | ---- | -------- | ---------- | -------------------------------------------------- |
+| `hx711_task`   | 0    | 5        | Real mode only | Poll HX711 @ 80 Hz, write to `volatile float` |
+| `app_main`     | 1    | —        | Always     | LVGL `lv_timer_handler` loop (5 ms tick)           |
+| `ota_srv_task` | 0    | 2        | Always     | Persistent HTTP server (OTA + history API)         |
 
 ### 6.2 Inter-task Communication
 
-| Primitive                        | Type                   | Direction                                      |
-| -------------------------------- | ---------------------- | ---------------------------------------------- |
-| `xQueueWeight`                   | Queue (float, depth 8) | hx711_task → grind_ctrl_task                   |
-| `xGrindEventGroup`               | EventGroup             | UI → grind_ctrl_task (START/STOP)              |
-| `xLvglMutex`                     | Mutex                  | Guards all `lv_*` calls from multiple contexts |
-| `s_ota_state` / `s_ota_progress` | `volatile` vars        | ota_srv_task → LVGL timer                      |
+| Primitive                        | Type            | Direction                                        |
+| -------------------------------- | --------------- | ------------------------------------------------ |
+| `s_latest_weight`                | `volatile float`| hx711_task (writer) → grind poll_cb (reader)     |
+| `s_ota_progress` / `s_ota_state` | `volatile` vars | ota_srv_task → LVGL poll timer in screen_ota     |
+| Direct function calls            | —               | UI calls `grind_ctrl_start/stop/purge()` directly|
 
 ---
 
@@ -404,15 +406,31 @@ if (live_weight >= stop_at_weight):
 
 ## 8. Persistence (NVS)
 
+**Namespace: default**
+
 | Key            | Type   | Description                             |
 | -------------- | ------ | --------------------------------------- |
 | `preset_count` | uint8  | Number of saved presets (default: 2)    |
 | `preset_N`     | float  | Weight for preset N (0-indexed)         |
 | `offset_g`     | float  | Pre-stop offset (default: 0.3 g)        |
 | `cal_factor`   | float  | HX711 calibration factor (default: 1.0) |
-| `brightness`   | uint8  | Display brightness 0–255 (default: 200) |
 | `wifi_ssid`    | string | Last connected SSID                     |
 | `wifi_pass`    | string | WiFi password                           |
+
+**Namespace: `disp_cfg`**
+
+| Key           | Type  | Description                                       |
+| ------------- | ----- | ------------------------------------------------- |
+| `brightness`  | uint8 | Display brightness 10–100 (default: 80)           |
+| `timeout_min` | uint8 | Sleep timeout in minutes; 0 = never (default: 10) |
+
+**Namespace: `grind_hist`**
+
+| Key       | Type  | Description                                    |
+| --------- | ----- | ---------------------------------------------- |
+| `count`   | uint16| Number of records stored (0–50)                |
+| `head`    | uint16| Circular buffer head index                     |
+| `records` | blob  | Array of `grind_record_t` {target_g, result_g} |
 
 ---
 
@@ -426,81 +444,81 @@ if (live_weight >= stop_at_weight):
 ## 10. PlatformIO Configuration
 
 ```ini
-[env:esp32s3]
-platform = espressif32
-board = esp32s3box
-framework = arduino
-board_build.arduino.memory_type = qio_opi
-board_upload.flash_size = 16MB
-
-lib_deps =
-    lvgl/lvgl @ ^8.3.10     ; resolves to 8.4.0
-    bogde/HX711 @ ^0.7.5
-
-build_flags =
-    -DBOARD_HAS_PSRAM
-    -DARDUINO_USB_MODE=1
-    -DARDUINO_USB_CDC_ON_BOOT=1
-    -DLV_CONF_INCLUDE_SIMPLE
-    -DCORE_DEBUG_LEVEL=3
-    -I include               ; required for LVGL to find lv_conf.h
+[env:waveshare_28b]
+platform = espressif32@6.12.0
+board = esp32-s3-devkitc-1
+framework = espidf
 
 monitor_speed = 115200
-monitor_filters = esp32_exception_decoder
+upload_speed = 921600
+
+board_build.flash_size = 16MB
+board_build.flash_mode = qio
+board_build.partitions = partitions.csv
 ```
 
-### LVGL Config Notes
+LVGL 9.x is included as a local component under `components/lvgl__lvgl/`. HX711 is not a library dependency — the driver will be implemented directly in `grind_controller.c` when hardware is available.
 
-- `LV_USE_BTNMATRIX 1` required — `LV_USE_KEYBOARD` and `LV_USE_MSGBOX` depend on it
-- Dark theme enabled (`LV_THEME_DEFAULT_DARK 1`)
-- Custom malloc/free using standard heap (PSRAM used directly for frame buffers)
+### LVGL Config Notes (`components/lv_conf.h`)
+
+- Dark theme enabled
+- Custom malloc/free using standard heap (PSRAM used for RGB frame buffers via bounce buffer)
 
 ---
 
 ## 11. Project Structure
 
 ```
-GBWUI/
+rocky-3000/
 ├── platformio.ini
+├── partitions.csv
 ├── DESIGN.md
-├── include/
-│   ├── pins.h              # All GPIO definitions
-│   ├── config.h            # Compile-time constants (weights, timing, tuning)
-│   └── lv_conf.h           # LVGL 8.4.x configuration
+├── CMakeLists.txt           # ESP-IDF project root
+├── sdkconfig.defaults
+├── sdkconfig.waveshare_28b  # Board-specific ESP-IDF config (PSRAM, 240 MHz)
+├── components/
+│   └── lvgl__lvgl/          # LVGL 9.x as a local ESP-IDF component
+│       └── lv_conf.h
 └── src/
-    ├── main.cpp             # Entry point, FreeRTOS task creation, SSR safe-off
-    ├── drivers/
-    │   ├── display.h/cpp    # ST7701 RGB panel + LVGL flush callback
-    │   ├── touch.h/cpp      # GT911 I2C driver + LVGL pointer input device
-    │   └── hx711_scale.h/cpp # HX711 task, tare, calibration factor
+    ├── main.c               # Entry point: hw init, wifi, grind ctrl, HTTP server, LVGL loop
+    ├── CMakeLists.txt       # Registers all source files as ESP-IDF component
+    ├── LCD_Driver/          # ST7701S RGB panel driver
+    ├── LVGL_Driver/         # LVGL display + flush integration
+    ├── Touch_Driver/        # GT911 capacitive touch + LVGL input device
+    ├── I2C_Driver/          # I2C master (GPIO7/15, 400 kHz)
+    ├── EXIO/                # TCA9554 GPIO expander (backlight, buzzer)
+    ├── Buzzer/              # Buzzer control
     ├── core/
-    │   ├── grind_controller.h/cpp  # Grind loop, SSR control, auto-tune offset
-    │   └── nvs_config.h/cpp        # NVS persistence, AppConfig struct
+    │   ├── grind_controller.h/c  # Grind state machine, SSR, demo mode, auto-tune
+    │   └── grind_history.h/c     # Shot history (circular buffer, NVS persistence)
     └── ui/
-        ├── ui_manager.h/cpp    # LVGL task, dark theme, toast system
-        └── screens/
-            ├── screen_main.h/cpp         # Main screen + preset add/edit/delete panel
-            ├── screen_settings.h/cpp     # Settings screen
-            ├── screen_calibration.h/cpp  # 3-step calibration wizard
-            ├── screen_wifi.h/cpp         # WiFi scan/connect/disconnect
-            └── screen_ota.h/cpp          # OTA firmware upload via HTTP
+        ├── ui_palette.h          # Color constants and layout values
+        ├── display_manager.h/c   # Brightness + sleep timeout (NVS: "disp_cfg")
+        ├── screen_main.h/c       # Main screen: presets, grind, purge, toasts
+        ├── screen_settings.h/c   # Settings: WiFi, Calibration, OTA, brightness, sleep
+        ├── screen_calibration.h/c # 3-step calibration wizard
+        ├── screen_wifi.h/c       # WiFi scan/connect/disconnect
+        ├── screen_ota.h/c        # OTA firmware update UI
+        ├── web_server.h/c        # HTTP server: /ota, /update, /history, /api/history
+        └── wifi_portal.h/c       # Background auto-connect + NTP sync
 ```
 
 ---
 
 ## 12. Milestones
 
-| #   | Status     | Milestone         | Notes                                                                    |
-| --- | ---------- | ----------------- | ------------------------------------------------------------------------ |
-| 1   | ✅ Done    | Project scaffold  | Compiles clean; 42% flash used                                           |
-| 2   | ⏳ Pending | Display + touch   | Needs hardware — ST7701 RGB driver written, GT911 stub needs TCA9554 RST |
-| 3   | ⏳ Pending | Weight driver     | HX711 code written; needs hardware calibration                           |
-| 4   | ⏳ Pending | SSR control       | GPIO code written; needs hardware test                                   |
-| 5   | ⏳ Pending | Core grind logic  | Grind loop + auto-tune written; needs hardware                           |
-| 6   | ✅ Done    | UI — Main screen  | All 3 states implemented                                                 |
-| 7   | ✅ Done    | UI — Preset flows | Add, edit, delete with stepper panel                                     |
-| 8   | ✅ Done    | UI — Settings     | Offset stepper, brightness slider, calibration wizard                    |
-| 9   | ✅ Done    | UI — Toasts       | Success + error toasts in ui_manager                                     |
-| 10  | ✅ Done    | WiFi + OTA        | Scan/connect/password modal; HTTP OTA server                             |
-| 11  | ✅ Done    | Persistence       | NVS save/load for all settings and presets                               |
-| 12  | ⏳ Pending | Polish & testing  | Hardware-dependent: offset tuning, edge cases                            |
+| #   | Status     | Milestone           | Notes                                                                 |
+| --- | ---------- | ------------------- | --------------------------------------------------------------------- |
+| 1   | ✅ Done    | Project scaffold    | Compiles clean on ESP-IDF / PlatformIO                                |
+| 2   | ⏳ Pending | Display + touch     | ST7701S + GT911 driver written; needs hardware verification           |
+| 3   | ⏳ Pending | Weight driver       | HX711 stubs in grind_controller.c; needs wiring and calibration       |
+| 4   | ⏳ Pending | SSR control         | GPIO33 code written; needs hardware test                              |
+| 5   | ⏳ Pending | Core grind logic    | Grind loop + auto-tune complete; demo mode active; needs hardware     |
+| 6   | ✅ Done    | UI — Main screen    | Idle/grinding/done states + WiFi icon + PURGE button                  |
+| 7   | ⏳ Pending | UI — Preset flows   | Add/edit/delete panel not yet implemented (callback is TODO stub)     |
+| 8   | ✅ Done    | UI — Settings       | Brightness slider, sleep timeout stepper, nav to WiFi/Cal/OTA         |
+| 9   | ✅ Done    | UI — Toasts         | Post-grind success toast in screen_main.c                             |
+| 10  | ✅ Done    | WiFi + OTA          | Scan/connect/password modal; persistent HTTP OTA + history server     |
+| 11  | ✅ Done    | Persistence         | NVS for presets, offset, brightness, sleep timeout, wifi creds, history |
+| 12  | ✅ Done    | Shot history        | Circular buffer (50 records), NVS persist, web API + HTML page        |
+| 13  | ⏳ Pending | Polish & testing    | Hardware-dependent: offset tuning, preset panel, edge cases           |

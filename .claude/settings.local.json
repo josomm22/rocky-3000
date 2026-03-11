@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wc -l /c/Users/jo/Documents/Coding/grinder/rocky-3000/src/*/*.c /c/Users/jo/Documents/Coding/grinder/rocky-3000/src/*/*.h 2>/dev/null)",
+      "Bash(find /c/Users/jo/Documents/Coding/grinder/rocky-3000/src -type f -name \"*.c\" | xargs wc -l | tail -1)",
+      "Bash(tree -L 3 -I \"__pycache__|.git|.pio\" /c/Users/jo/Documents/Coding/grinder/rocky-3000/ 2>/dev/null || find /c/Users/jo/Documents/Coding/grinder/rocky-3000 -type d -not -path \"*/.pio/*\" -not -path \"*/.git/*\" -not -path \"*/components/*\" | head -30)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(gh api:*)",
+      "WebFetch(domain:api.github.com)"
+    ]
+  }
+}
