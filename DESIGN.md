@@ -522,3 +522,122 @@ rocky-3000/
 | 11  | ✅ Done    | Persistence         | NVS for presets, offset, brightness, sleep timeout, wifi creds, history |
 | 12  | ✅ Done    | Shot history        | Circular buffer (50 records), NVS persist, web API + HTML page        |
 | 13  | ⏳ Pending | Polish & testing    | Hardware-dependent: offset tuning, preset panel, edge cases           |
+| 14  | ⏳ Pending | Flow-rate stop prediction | Replace fixed offset with dynamic latency-based overshoot     |
+| 15  | ⏳ Pending | Post-stop pulse refinement | Iterative short pulses to close gap on current shot          |
+| 16  | ⏳ Pending | Settling detection  | Replace fixed 200 ms delay with std-dev stability check               |
+
+---
+
+## 13. Planned Grind Control Improvements
+
+> Reference implementation: [jaapp/smart-grind-by-weight](https://github.com/jaapp/smart-grind-by-weight)
+
+The current grind controller uses a simple fixed pre-stop offset with post-shot EMA auto-tune. Three improvements are planned for when real hardware (HX711 + SSR) is verified.
+
+---
+
+### 13.1 Dynamic Flow-Rate-Based Stop Prediction
+
+**Current behaviour:**
+```c
+float stop_at = s_target - s_offset;  // s_offset fixed, default 0.3 g
+```
+
+**Problem:** The grinder coast distance depends on how fast grounds are flowing at cutoff. A freshly burr-set grinder running coarse grinds faster and coasts further than a fine espresso grind. A fixed offset cannot account for this.
+
+**Planned approach:**
+
+Calculate a rolling flow rate (g/s) using a short sliding window over recent HX711 samples, then derive the stop threshold from measured motor latency and current flow rate:
+
+```
+flow_rate_g_s  = Δweight / Δtime  (rolling 200 ms window)
+coast_g        = (motor_latency_ms / 1000.0) × flow_rate_g_s × COAST_RATIO
+stop_at        = target - coast_g
+```
+
+`motor_latency_ms` is the total delay from SSR de-energise command to burrs stopping (SSR switching time + motor rundown). Typical range 30–150 ms; stored in NVS, initially set to a conservative default (100 ms).
+
+`COAST_RATIO` (initially 1.0) can be tuned down if systematic overshoot remains after latency is calibrated.
+
+**Implementation notes:**
+- Flow rate computed inside `hx711_task` (real mode) using a circular buffer of `{weight, timestamp}` pairs.
+- Exposed via `grind_ctrl_get_flow_rate()`.
+- `poll_cb` uses the live flow rate for the stop decision instead of the fixed `s_offset`.
+- `motor_latency_ms` added to NVS namespace `default` as key `motor_lat_ms` (float, default 0.1).
+
+---
+
+### 13.2 Post-Stop Pulse Refinement
+
+**Current behaviour:** Single-shot stop. If the final settled weight is short of target, the deficit is only corrected on the next shot via auto-tune.
+
+**Problem:** A single missed shot wastes the dose; baristas notice immediately.
+
+**Planned approach:**
+
+After the main grind stops and the scale settles, check the shortfall. If it exceeds a minimum threshold, fire one or more short correction pulses:
+
+```
+shortfall = target - settled_weight
+
+while shortfall > PULSE_MIN_G and attempts < PULSE_MAX_ATTEMPTS:
+    pulse_ms = (shortfall / flow_rate_g_s) × 1000 × PULSE_FACTOR
+    pulse_ms = clamp(pulse_ms, PULSE_MIN_MS, PULSE_MAX_MS)
+    energise SSR for pulse_ms
+    wait for scale to settle
+    shortfall = target - settled_weight
+    attempts++
+```
+
+Constants (tunable, stored in NVS):
+| Constant | Default | Notes |
+|---|---|---|
+| `PULSE_MIN_G` | 0.15 g | Below this, don't pulse (noise floor) |
+| `PULSE_MAX_ATTEMPTS` | 3 | Prevents infinite loop on stuck scale |
+| `PULSE_MIN_MS` | 30 ms | Shortest meaningful SSR pulse |
+| `PULSE_MAX_MS` | 500 ms | Safety cap |
+| `PULSE_FACTOR` | 0.8 | Intentional undershoot per pulse |
+
+**State machine addition:**
+```
+GRIND_IDLE → GRIND_RUNNING → GRIND_SETTLING → GRIND_PULSING → GRIND_DONE → GRIND_IDLE
+```
+
+`GRIND_SETTLING` — waits for scale stability after main stop.
+`GRIND_PULSING` — fires correction pulses; loops back to `GRIND_SETTLING` after each.
+
+**UI impact:** The grind button continues showing live weight during pulse refinement. A "Refining…" label (or subtle animation) indicates the extra pulses to the user.
+
+---
+
+### 13.3 Scale Settling Detection
+
+**Current behaviour (real mode):**
+```c
+vTaskDelay(pdMS_TO_TICKS(200));   /* fixed 200 ms coast settle */
+s_result = (float)s_latest_weight;
+```
+
+**Problem:** 200 ms is a guess. A light dose on a stiff platform may settle in 80 ms; a heavy moka pot dose may still be oscillating at 300 ms.
+
+**Planned approach:**
+
+Declare settled when the standard deviation of the last N samples falls below a gram threshold:
+
+```c
+#define SETTLE_WINDOW_SAMPLES  10     // ~125 ms at 80 Hz
+#define SETTLE_STD_DEV_G       0.05f  // 0.05 g RMS threshold
+
+bool is_settled(void) {
+    // compute mean and std dev of last SETTLE_WINDOW_SAMPLES from circular buffer
+    // return std_dev < SETTLE_STD_DEV_G
+}
+```
+
+`hx711_task` maintains a fixed-size circular buffer of raw calibrated readings. `is_settled()` is called by `poll_cb` after SSR cutoff instead of waiting a fixed delay. A timeout (1 s) prevents hanging if the scale never settles (e.g. vibrating bench).
+
+**Implementation notes:**
+- Circular buffer added to `hx711_task` (real mode only); size `SETTLE_WINDOW_SAMPLES`.
+- `grind_ctrl_is_settled()` exposed in the public API.
+- Existing `vTaskDelay(200)` call removed and replaced with a polling loop using `is_settled()` + timeout.
+- `SETTLE_STD_DEV_G` and `SETTLE_WINDOW_SAMPLES` defined in `grind_controller.h` for easy tuning.
