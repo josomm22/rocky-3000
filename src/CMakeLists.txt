@@ -8,6 +8,7 @@ idf_component_register(
          "EXIO/TCA9554PWR.c"
          "Buzzer/Buzzer.c"
          "core/grind_controller.c"
+         "core/hx711.c"
          "core/grind_history.c"
          "ui/screen_main.c"
          "ui/screen_settings.c"

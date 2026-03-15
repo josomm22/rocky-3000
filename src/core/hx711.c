@@ -1,0 +1,107 @@
+/*
+ * GBWUI — HX711 bit-bang driver
+ *
+ * Timing: PD_SCK HIGH/LOW minimum is 0.2 µs per HX711 datasheet.
+ * esp_rom_delay_us(1) gives ~1 µs which is comfortably within limits.
+ * DOUT is valid within 100 ns of PD_SCK falling edge — no extra delay needed.
+ */
+
+#include "hx711.h"
+#include "driver/gpio.h"
+#include "esp_rom_sys.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+#define TARE_SAMPLES  16   /* averaged for zero offset; ~200 ms at 80 Hz */
+
+static gpio_num_t s_dout;
+static gpio_num_t s_pd_sck;
+static int32_t    s_tare_offset = 0;
+
+void hx711_init(gpio_num_t dout, gpio_num_t pd_sck)
+{
+    s_dout   = dout;
+    s_pd_sck = pd_sck;
+
+    /*
+     * DOUT (GPIO43 = UART0 TXD): configure as input via the GPIO matrix
+     * WITHOUT calling gpio_reset_pin.  gpio_reset_pin would remove the UART
+     * IOMUX function, causing the UART TX FIFO to block and trigger the
+     * interrupt watchdog.  Setting direction alone enables the GPIO matrix
+     * INPUT path (which reads the physical pin voltage) while leaving UART
+     * TXD in control of the output — UART logging remains fully functional.
+     * Side effect: DOUT reads HIGH (UART idle) so hx711_is_ready() returns
+     * false until the HX711 is physically wired.  That is the correct
+     * behaviour: the tare loop yields via vTaskDelay and never crashes.
+     *
+     * When HX711 is physically wired, call uart_driver_delete(UART_NUM_0)
+     * before this function so GPIO43 can be fully reclaimed.
+     */
+    gpio_set_direction(s_dout, GPIO_MODE_INPUT);
+
+    /*
+     * CLK (GPIO44 = UART0 RXD): safe to fully reset — we never use UART RX,
+     * so removing the RXD IOMUX function has no impact.
+     */
+    gpio_reset_pin(s_pd_sck);
+    gpio_set_direction(s_pd_sck, GPIO_MODE_OUTPUT);
+    gpio_set_level(s_pd_sck, 0);   /* keep CLK low = powered-up, ready */
+
+    s_tare_offset = 0;
+}
+
+bool hx711_is_ready(void)
+{
+    return gpio_get_level(s_dout) == 0;
+}
+
+/*
+ * Read one 24-bit sample from the HX711 and issue the 25th CLK pulse
+ * to select Channel A / Gain 128 for the next conversion.
+ * Caller must ensure hx711_is_ready() before calling.
+ */
+static int32_t read_raw(void)
+{
+    uint32_t raw = 0;
+
+    for (int i = 0; i < 24; i++) {
+        gpio_set_level(s_pd_sck, 1);
+        esp_rom_delay_us(1);
+        raw = (raw << 1) | (uint32_t)gpio_get_level(s_dout);
+        gpio_set_level(s_pd_sck, 0);
+        esp_rom_delay_us(1);
+    }
+
+    /* 25th pulse: sets Channel A, Gain 128 for next conversion */
+    gpio_set_level(s_pd_sck, 1);
+    esp_rom_delay_us(1);
+    gpio_set_level(s_pd_sck, 0);
+    esp_rom_delay_us(1);
+
+    /* Sign-extend from 24-bit two's complement */
+    if (raw & 0x800000u)
+        raw |= 0xFF000000u;
+
+    return (int32_t)raw;
+}
+
+void hx711_tare(void)
+{
+    int64_t sum = 0;
+    for (int i = 0; i < TARE_SAMPLES; i++) {
+        while (!hx711_is_ready())
+            vTaskDelay(1);
+        sum += read_raw();
+    }
+    s_tare_offset = (int32_t)(sum / TARE_SAMPLES);
+}
+
+bool hx711_read_grams(float cal_factor, float *out_g)
+{
+    if (!hx711_is_ready())
+        return false;
+
+    int32_t raw = read_raw() - s_tare_offset;
+    *out_g = (float)raw * cal_factor;
+    return true;
+}

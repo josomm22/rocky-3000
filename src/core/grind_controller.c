@@ -29,7 +29,7 @@
 /* ── Build-time config ──────────────────────────────────────── */
 
 #ifndef GRIND_DEMO_MODE
-#define GRIND_DEMO_MODE 1
+#define GRIND_DEMO_MODE 0
 #endif
 
 /* Pre-stop offset defaults & clamps */
@@ -42,6 +42,10 @@
 /* UI display refresh via LVGL timer (does NOT affect HX711 sample rate) */
 #define UI_POLL_MS  100
 
+/* Declared here so hx711_task (real mode) can read it before the rest of
+ * the module state block. */
+static volatile float s_cal_factor = 1.0f;
+
 #if GRIND_DEMO_MODE
 /* Simulated grind speed — realistic espresso dose in ~6 s */
 #define DEMO_RAMP_G_PER_SEC   3.0f
@@ -51,13 +55,16 @@
 #define DEMO_NOISE_AMP        0.03f
 #else
 /* Real mode ────────────────────────────────────────────────── */
+#include "hx711.h"
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-/* TODO: include HX711 driver header here */
-/* #include "hx711.h" */
 
-#define GPIO_SSR        GPIO_NUM_33
+#define GPIO_SSR          GPIO_NUM_33
+#define GPIO_HX711_DATA   GPIO_NUM_43   /* UART0 TXD — do NOT gpio_reset_pin this pin;
+                                           see hx711_init() for rationale */
+#define GPIO_HX711_CLK    GPIO_NUM_44   /* UART0 RXD — safe to reconfigure as output */
+
 #define HX711_POLL_HZ   80              /* module output data rate (Hz)   */
 #define HX711_POLL_MS   (1000 / HX711_POLL_HZ)  /* 12 ms between samples */
 #define HX711_TASK_STACK  2048
@@ -74,15 +81,13 @@ static volatile float s_latest_weight = 0.0f;
 static void hx711_task(void *arg)
 {
     (void)arg;
-    /* TODO: initialise HX711 driver, set gain, tare */
-    /* hx711_init(GPIO_HX711_DATA, GPIO_HX711_CLK, HX711_GAIN_128); */
-    /* hx711_tare(); */
+    hx711_init(GPIO_HX711_DATA, GPIO_HX711_CLK);
+    hx711_tare();
 
     while (1) {
-        /* TODO: read one sample, apply calibration factor, write to shared var */
-        /* float raw = hx711_read();
-           s_latest_weight = raw * cal_factor; */
-
+        float g;
+        if (hx711_read_grams(s_cal_factor, &g))
+            s_latest_weight = g;
         vTaskDelay(pdMS_TO_TICKS(HX711_POLL_MS));
     }
 }
@@ -90,13 +95,18 @@ static void hx711_task(void *arg)
 
 /* ── Module state ───────────────────────────────────────────── */
 
-static float          s_cal_factor = 1.0f;
 static grind_state_t  s_state      = GRIND_IDLE;
 static float          s_target     = 18.0f;
 static float          s_offset  = DEFAULT_OFFSET_G;
 static float          s_weight  = 0.0f;   /* snapshot read by UI / grind logic */
 static float          s_result  = 0.0f;
 static lv_timer_t    *s_timer   = NULL;
+
+/* Coast settle (real mode only): ticks remaining after SSR cutoff before
+ * reading the final weight.  2 × UI_POLL_MS = 200 ms, avoids blocking
+ * the LVGL task with vTaskDelay. */
+#define SETTLE_TICKS  2
+static int            s_settle_ticks = 0;
 
 /* Purge */
 #define PURGE_DURATION_MS  1500
@@ -151,6 +161,22 @@ static float lcg_noise(void)
 static void poll_cb(lv_timer_t *t)
 {
     (void)t;
+
+#if !GRIND_DEMO_MODE
+    /* Waiting for coast-settle after SSR cutoff: count down ticks then
+     * record the final weight.  s_state stays RUNNING during this window
+     * so the display keeps refreshing. */
+    if (s_settle_ticks > 0) {
+        s_weight = (float)s_latest_weight;
+        if (--s_settle_ticks == 0) {
+            s_result = s_weight;
+            run_autotune();
+            s_state = GRIND_DONE;
+        }
+        return;
+    }
+#endif
+
     if (s_state != GRIND_RUNNING)
         return;
 
@@ -170,13 +196,12 @@ static void poll_cb(lv_timer_t *t)
 #if GRIND_DEMO_MODE
         s_result = stop_at + DEMO_OVERSHOOT_G + lcg_noise() * 0.05f;
         if (s_result < 0.0f) s_result = 0.0f;
-#else
-        /* Grinder has already stopped; read one more settled sample */
-        vTaskDelay(pdMS_TO_TICKS(200));   /* 200 ms coast settle */
-        s_result = (float)s_latest_weight;
-#endif
         run_autotune();
         s_state = GRIND_DONE;
+#else
+        /* Start coast-settle countdown; result recorded after SETTLE_TICKS */
+        s_settle_ticks = SETTLE_TICKS;
+#endif
     }
 }
 
@@ -189,9 +214,11 @@ void grind_ctrl_init(void)
     s_offset = DEFAULT_OFFSET_G;
 
 #if !GRIND_DEMO_MODE
-    gpio_reset_pin(GPIO_SSR);
-    gpio_set_direction(GPIO_SSR, GPIO_MODE_OUTPUT);
-    gpio_set_level(GPIO_SSR, 0);
+    /* NOTE: GPIO33 (SSR) is an OPI-PSRAM data line on ESP32-S3R8 — DO NOT
+     * call gpio_reset_pin or gpio_set_direction on it.  The correct SSR pin
+     * needs to be identified from a free non-PSRAM GPIO (GPIO33-37 are all
+     * internally connected to PSRAM on the R8 variant and must not be used).
+     * SSR control is disabled until a safe pin is chosen. */
 
     /* Start the 80 Hz HX711 reader on Core 0 */
     xTaskCreatePinnedToCore(hx711_task, "hx711", HX711_TASK_STACK,
@@ -207,10 +234,11 @@ void grind_ctrl_start(float target_g)
     if (s_state == GRIND_RUNNING)
         return;
 
-    s_target = target_g;
-    s_weight = 0.0f;
-    s_result = 0.0f;
-    s_state  = GRIND_RUNNING;
+    s_target       = target_g;
+    s_weight       = 0.0f;
+    s_result       = 0.0f;
+    s_settle_ticks = 0;
+    s_state        = GRIND_RUNNING;
 
     ssr_set(1);
     lv_timer_resume(s_timer);

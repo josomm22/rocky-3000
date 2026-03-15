@@ -20,7 +20,7 @@
 
 /* ── Wizard state (reset on each screen_calibration_load) ────── */
 static int    s_step        = 1;
-static float  s_known_g     = 100.0f;
+static float  s_known_g     = 20.0f;
 static float  s_raw_reading = 0.0f;
 static float  s_cal_factor  = 1.0f;
 
