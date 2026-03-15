@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-**GBWUI (Grind By Weight UI)** — an ESP32-S3 embedded application for a coffee grinder controller. It monitors live weight via an HX711 load cell, controls the grinder via an SSR on GPIO33, and presents a touch UI on a 2.8" capacitive touch LCD (480×640, ST7701S, GT911 touch). UI framework is LVGL 9.x on ESP-IDF.
+**GBWUI (Grind By Weight UI)** — an ESP32-S3 embedded application for a coffee grinder controller. It monitors live weight via an HX711 load cell, controls the grinder via an SSR on GPIO43, and presents a touch UI on a 2.8" capacitive touch LCD (480×640, ST7701S, GT911 touch). UI framework is LVGL 9.x on ESP-IDF.
 
 ## Build Commands
 
@@ -60,8 +60,8 @@ Network                  →  ui/wifi_portal.c, ui/web_server.c
 GRIND_IDLE → GRIND_RUNNING → GRIND_DONE → GRIND_IDLE
 ```
 
-- `GRIND_DEMO_MODE=1` (currently active): simulates weight at 3 g/sec with noise
-- `GRIND_DEMO_MODE=0`: real HX711 task on Core 0 at 80 Hz, atomic `volatile float` shared with LVGL poll timer
+- `GRIND_DEMO_MODE=0` (active): real HX711 task on Core 0 at 80 Hz, atomic `volatile float` shared with LVGL poll timer
+- `GRIND_DEMO_MODE=1`: simulates weight at 3 g/sec with noise (no hardware needed)
 - Auto-tune: post-grind `new_offset = clamp(offset + delta × 0.5, 0.0, 5.0)`, converges in ~3 shots
 
 ### FreeRTOS Tasks
@@ -87,6 +87,7 @@ Dual OTA setup: `ota_0` + `ota_1` (3 MB each), 16 KB NVS, 8 KB OTA data, 528 KB 
 
 - **I2C bus**: GPIO7 (SCL), GPIO15 (SDA), 400 kHz — serves GT911 touch, TCA9554 GPIO expander
 - **TCA9554** (0x20): controls backlight and buzzer via `EXIO/`
-- **HX711**: GPIO43 (DATA), GPIO44 (CLK) — not yet wired, demo mode active
-- **SSR**: GPIO33, active HIGH
+- **HX711**: GPIO4 (DATA), GPIO44 (CLK) — real mode active (`GRIND_DEMO_MODE=0`)
+- **SSR**: GPIO43, active HIGH — UART0 TXD remapped off this pin at boot via `uart_set_pin`; monitor output via USB Serial/JTAG
+- **GPIO33–37**: OPI-PSRAM data lines on ESP32-S3R8 — never use these as GPIO
 - Board: Waveshare ESP32-S3-Touch-LCD-2.8B

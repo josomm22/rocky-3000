@@ -23,26 +23,9 @@ void hx711_init(gpio_num_t dout, gpio_num_t pd_sck)
     s_dout   = dout;
     s_pd_sck = pd_sck;
 
-    /*
-     * DOUT (GPIO43 = UART0 TXD): configure as input via the GPIO matrix
-     * WITHOUT calling gpio_reset_pin.  gpio_reset_pin would remove the UART
-     * IOMUX function, causing the UART TX FIFO to block and trigger the
-     * interrupt watchdog.  Setting direction alone enables the GPIO matrix
-     * INPUT path (which reads the physical pin voltage) while leaving UART
-     * TXD in control of the output — UART logging remains fully functional.
-     * Side effect: DOUT reads HIGH (UART idle) so hx711_is_ready() returns
-     * false until the HX711 is physically wired.  That is the correct
-     * behaviour: the tare loop yields via vTaskDelay and never crashes.
-     *
-     * When HX711 is physically wired, call uart_driver_delete(UART_NUM_0)
-     * before this function so GPIO43 can be fully reclaimed.
-     */
+    gpio_reset_pin(s_dout);
     gpio_set_direction(s_dout, GPIO_MODE_INPUT);
 
-    /*
-     * CLK (GPIO44 = UART0 RXD): safe to fully reset — we never use UART RX,
-     * so removing the RXD IOMUX function has no impact.
-     */
     gpio_reset_pin(s_pd_sck);
     gpio_set_direction(s_pd_sck, GPIO_MODE_OUTPUT);
     gpio_set_level(s_pd_sck, 0);   /* keep CLK low = powered-up, ready */

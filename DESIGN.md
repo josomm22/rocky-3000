@@ -30,11 +30,11 @@ GBWUI is an embedded application running on an ESP32-S3 that provides **grind-by
 
 ### 3.4 Project-Specific Pins
 
-| Signal      | GPIO | Notes                  |
-| ----------- | ---- | ---------------------- |
-| HX711 DATA  | 43   | Free GPIO              |
-| HX711 CLK   | 44   | Free GPIO              |
-| SSR control | 33   | Free GPIO, active HIGH |
+| Signal      | GPIO | Notes                                                      |
+| ----------- | ---- | ---------------------------------------------------------- |
+| HX711 DATA  | 4    | Free GPIO                                                  |
+| HX711 CLK   | 44   | UART0 RXD — fully reclaimed (UART RX unused)               |
+| SSR control | 43   | UART0 TXD — freed at boot via `uart_set_pin` remap; active HIGH |
 
 ---
 
@@ -58,7 +58,7 @@ GBWUI is an embedded application running on an ESP32-S3 that provides **grind-by
 
 1. User taps a preset pill (highlights it with arc) then presses **GRIND**
 2. System auto-tares the scale
-3. SSR energised (GPIO33 HIGH) → grinder on
+3. SSR energised (GPIO43 HIGH) → grinder on
 4. Live weight shown inside the GRIND button; STOP button appears bottom-right
 5. When `live_weight >= (target_weight - pre_stop_offset)` → SSR de-energised
 6. Final weight recorded (+ simulated overshoot in demo mode)
@@ -76,7 +76,7 @@ GBWUI is an embedded application running on an ESP32-S3 that provides **grind-by
 
 ### 4.5 Relay Control
 
-- GPIO33, active HIGH
+- GPIO43, active HIGH (UART0 TXD remapped at boot via `uart_set_pin`)
 - Always LOW on boot, on any error, and when idle
 
 ---

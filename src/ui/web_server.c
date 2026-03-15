@@ -7,6 +7,7 @@
 
 #include "web_server.h"
 #include "grind_history.h"
+#include "grind_controller.h"
 #include "esp_http_server.h"
 #include "esp_ota_ops.h"
 #include "esp_log.h"
@@ -75,6 +76,15 @@ static const char HIST_HEAD[] =
     "</style></head><body>"
     "<h1>&#9749; Grind History</h1>"
     "<p class='sub'>Shot log — target vs dispensed weight</p>"
+    /* Live scale card — populated by /api/sensor polling */
+    "<div class='stats'>"
+      "<div class='stat'><div class='stat-val' id='sv-live'>--</div>"
+        "<div class='stat-lbl'>Live (calibrated g)</div></div>"
+      "<div class='stat'><div class='stat-val' id='sv-raw'>--</div>"
+        "<div class='stat-lbl'>Raw (cal=1)</div></div>"
+      "<div class='stat'><div class='stat-val' id='sv-cal'>--</div>"
+        "<div class='stat-lbl'>Cal factor</div></div>"
+    "</div>"
     /* inline data injected by server here */
     "<script>var shots=";
 
@@ -163,6 +173,17 @@ static const char HIST_TAIL[] =
       "document.write('<div class=\\'empty\\'>No grind history yet.</div>');"
     "}"
     "document.write('<a class=\\'btn\\' href=\\'/history\\'>&#8635; Refresh</a>');"
+    "</script>"
+    /* Live sensor polling — updates the Scale card every 500 ms */
+    "<script>"
+    "(function poll(){"
+      "fetch('/api/sensor').then(function(r){return r.json();}).then(function(d){"
+        "document.getElementById('sv-live').textContent=d.live_g.toFixed(2)+'g';"
+        "document.getElementById('sv-raw').textContent=d.raw_g.toFixed(2);"
+        "document.getElementById('sv-cal').textContent=d.cal.toFixed(4);"
+      "}).catch(function(){});"
+      "setTimeout(poll,500);"
+    "})();"
     "</script></body></html>";
 
 /* ── History handlers ─────────────────────────────────────────── */
@@ -205,6 +226,21 @@ static esp_err_t handle_history_json(httpd_req_t *req)
     }
     httpd_resp_send_chunk(req, "]}", HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
+}
+
+/* ── Sensor endpoint ──────────────────────────────────────────── */
+
+static esp_err_t handle_sensor(httpd_req_t *req)
+{
+    float live = grind_ctrl_get_live_weight();
+    float cal  = grind_ctrl_get_cal_factor();
+    float raw  = (cal > 0.0001f) ? live / cal : 0.0f;
+    char buf[64];
+    snprintf(buf, sizeof(buf), "{\"live_g\":%.2f,\"raw_g\":%.2f,\"cal\":%.4f}",
+             live, raw, cal);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, buf);
     return ESP_OK;
 }
 
@@ -400,6 +436,9 @@ void web_server_start(void)
     static const httpd_uri_t history_json_uri = {
         .uri = "/api/history", .method = HTTP_GET, .handler = handle_history_json
     };
+    static const httpd_uri_t sensor_uri = {
+        .uri = "/api/sensor", .method = HTTP_GET, .handler = handle_sensor
+    };
     static const httpd_uri_t ota_uri = {
         .uri = "/ota", .method = HTTP_GET, .handler = handle_ota
     };
@@ -409,6 +448,7 @@ void web_server_start(void)
 
     httpd_register_uri_handler(server, &history_uri);
     httpd_register_uri_handler(server, &history_json_uri);
+    httpd_register_uri_handler(server, &sensor_uri);
     httpd_register_uri_handler(server, &ota_uri);
     httpd_register_uri_handler(server, &update_uri);
 

@@ -57,13 +57,13 @@ static volatile float s_cal_factor = 1.0f;
 /* Real mode ────────────────────────────────────────────────── */
 #include "hx711.h"
 #include "driver/gpio.h"
+#include "driver/uart.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#define GPIO_SSR          GPIO_NUM_33
-#define GPIO_HX711_DATA   GPIO_NUM_43   /* UART0 TXD — do NOT gpio_reset_pin this pin;
-                                           see hx711_init() for rationale */
-#define GPIO_HX711_CLK    GPIO_NUM_44   /* UART0 RXD — safe to reconfigure as output */
+#define GPIO_SSR          GPIO_NUM_43   /* freed from UART0 TXD by uart_set_pin remap */
+#define GPIO_HX711_DATA   GPIO_NUM_4
+#define GPIO_HX711_CLK    GPIO_NUM_44   /* UART0 RXD — safe to fully reconfigure */
 
 #define HX711_POLL_HZ   80              /* module output data rate (Hz)   */
 #define HX711_POLL_MS   (1000 / HX711_POLL_HZ)  /* 12 ms between samples */
@@ -78,16 +78,28 @@ static volatile float s_cal_factor = 1.0f;
  */
 static volatile float s_latest_weight = 0.0f;
 
+/* EMA smoothing: α=0.2 → τ ≈ 4 samples (50 ms at 80 Hz).
+ * Reduces per-sample noise ~2.2× while staying fast enough for
+ * threshold detection and the 100 ms display refresh. */
+#define HX711_EMA_ALPHA  0.2f
+
 static void hx711_task(void *arg)
 {
     (void)arg;
     hx711_init(GPIO_HX711_DATA, GPIO_HX711_CLK);
     hx711_tare();
 
+    /* Prime the EMA with the first valid reading so it doesn't
+     * crawl up from 0.0 on startup. */
+    float g;
+    while (!hx711_read_grams(s_cal_factor, &g))
+        vTaskDelay(1);
+    s_latest_weight = g;
+
     while (1) {
-        float g;
         if (hx711_read_grams(s_cal_factor, &g))
-            s_latest_weight = g;
+            s_latest_weight = HX711_EMA_ALPHA * g
+                              + (1.0f - HX711_EMA_ALPHA) * s_latest_weight;
         vTaskDelay(pdMS_TO_TICKS(HX711_POLL_MS));
     }
 }
@@ -214,11 +226,15 @@ void grind_ctrl_init(void)
     s_offset = DEFAULT_OFFSET_G;
 
 #if !GRIND_DEMO_MODE
-    /* NOTE: GPIO33 (SSR) is an OPI-PSRAM data line on ESP32-S3R8 — DO NOT
-     * call gpio_reset_pin or gpio_set_direction on it.  The correct SSR pin
-     * needs to be identified from a free non-PSRAM GPIO (GPIO33-37 are all
-     * internally connected to PSRAM on the R8 variant and must not be used).
-     * SSR control is disabled until a safe pin is chosen. */
+    /* Remap UART0 TXD/RXD off their default pins so GPIO43 is a free GPIO.
+     * ESP_LOG output continues via USB Serial/JTAG (secondary console). */
+    uart_set_pin(UART_NUM_0, GPIO_NUM_NC, GPIO_NUM_NC,
+                 UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+
+    /* SSR — active HIGH, default OFF */
+    gpio_reset_pin(GPIO_SSR);
+    gpio_set_direction(GPIO_SSR, GPIO_MODE_OUTPUT);
+    gpio_set_level(GPIO_SSR, 0);
 
     /* Start the 80 Hz HX711 reader on Core 0 */
     xTaskCreatePinnedToCore(hx711_task, "hx711", HX711_TASK_STACK,
