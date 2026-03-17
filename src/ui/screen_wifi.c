@@ -136,12 +136,14 @@ void wifi_autoconnect(void)
     size_t ssid_len = sizeof(ssid);
     size_t pass_len = sizeof(password);
 
-    if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK)
-        return;
-    bool have_creds =
-        (nvs_get_str(h, "ssid", ssid, &ssid_len) == ESP_OK && ssid[0] != '\0');
-    nvs_get_str(h, "password", password, &pass_len);
-    nvs_close(h);
+    bool have_creds = false;
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) == ESP_OK)
+    {
+        have_creds =
+            (nvs_get_str(h, "ssid", ssid, &ssid_len) == ESP_OK && ssid[0] != '\0');
+        nvs_get_str(h, "password", password, &pass_len);
+        nvs_close(h);
+    }
 
     /* Fall back to compile-time defaults from secrets.h if NVS is empty */
     if (!have_creds && DEFAULT_WIFI_SSID[0] != '\0')
