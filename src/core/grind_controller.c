@@ -61,9 +61,9 @@ static volatile float s_cal_factor = 1.0f;
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#define GPIO_SSR          GPIO_NUM_43   /* freed from UART0 TXD by uart_set_pin remap */
-#define GPIO_HX711_DATA   GPIO_NUM_4
-#define GPIO_HX711_CLK    GPIO_NUM_44   /* UART0 RXD — safe to fully reconfigure */
+#define GPIO_SSR          GPIO_NUM_4    /* moved here; GPIO43/44 now used by HX711 */
+#define GPIO_HX711_DATA   GPIO_NUM_44  /* UART0 RXD — reconfigured as HX711 DOUT */
+#define GPIO_HX711_CLK    GPIO_NUM_43  /* UART0 TXD — reconfigured as HX711 SCK; serial monitor disabled */
 
 #define HX711_POLL_HZ   80              /* module output data rate (Hz)   */
 #define HX711_POLL_MS   (1000 / HX711_POLL_HZ)  /* 12 ms between samples */
@@ -226,8 +226,9 @@ void grind_ctrl_init(void)
     s_offset = DEFAULT_OFFSET_G;
 
 #if !GRIND_DEMO_MODE
-    /* Remap UART0 TXD/RXD off their default pins so GPIO43 is a free GPIO.
-     * ESP_LOG output continues via USB Serial/JTAG (secondary console). */
+    /* Detach UART0 from its default pins (GPIO43=TXD, GPIO44=RXD) so the
+     * HX711 driver can drive them as plain GPIO.  Serial monitor is
+     * unavailable; ESP_LOG output continues via USB Serial/JTAG only. */
     uart_set_pin(UART_NUM_0, GPIO_NUM_NC, GPIO_NUM_NC,
                  UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
 
