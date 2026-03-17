@@ -4,18 +4,41 @@
 
 #include <stdio.h>
 #include <string.h>
+#include "nvs_flash.h"
+#include "nvs.h"
 #include "lvgl.h"
 #include "ui_palette.h"
 #include "screen_main.h"
 #include "screen_settings.h"
 #include "screen_wifi.h"
+#include "screen_preset_edit.h"
 #include "grind_controller.h"
 #include "grind_history.h"
+
+/* ── NVS namespace for presets ──────────────────────────────── */
+#define PRESET_NVS_NS "app_cfg"
 
 /* ── Preset state (persists across reloads) ─────────────────── */
 static float s_weights[PRESET_MAX] = {18.0f, 21.0f};
 static int s_count = 2;
 static int s_active = 0;
+
+/* ── NVS preset persistence ─────────────────────────────────── */
+static void presets_save_nvs(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(PRESET_NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_u8(h, "p_count", (uint8_t)s_count);
+    for (int i = 0; i < s_count; i++) {
+        char key[16];
+        snprintf(key, sizeof(key), "p_%d", i);
+        uint32_t bits;
+        memcpy(&bits, &s_weights[i], sizeof(bits));
+        nvs_set_u32(h, key, bits);
+    }
+    nvs_commit(h);
+    nvs_close(h);
+}
 
 /* ── UI object handles (reset on each load) ─────────────────── */
 static lv_obj_t   *s_scr          = NULL;
@@ -187,7 +210,15 @@ static void add_preset_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED)
         return;
-    /* TODO: open add-preset panel */
+    screen_preset_edit_load(-1, 18.0f);
+}
+
+static void pill_longpress_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_LONG_PRESSED)
+        return;
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    screen_preset_edit_load(idx, s_weights[idx]);
 }
 
 static void grind_cb(lv_event_t *e)
@@ -304,6 +335,7 @@ static void rebuild_preset_row(void)
         lv_obj_set_style_bg_color(pill, COL_PRESET_BG, LV_PART_MAIN | LV_STATE_PRESSED);
         lv_obj_set_style_bg_opa(pill, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_PRESSED);
         lv_obj_add_event_cb(pill, preset_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        lv_obj_add_event_cb(pill, pill_longpress_cb, LV_EVENT_LONG_PRESSED, (void *)(intptr_t)i);
 
         char buf[12];
         float w = s_weights[i];
@@ -524,4 +556,59 @@ void screen_main_load(void)
     lv_obj_update_layout(scr);
     position_sel_frame(s_active);
     lv_obj_move_foreground(s_sel_frame);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+ * Public preset API
+ * ═══════════════════════════════════════════════════════════════ */
+
+void screen_main_preset_init(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(PRESET_NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
+
+    uint8_t cnt = 0;
+    if (nvs_get_u8(h, "p_count", &cnt) == ESP_OK && cnt >= 1 && cnt <= PRESET_MAX) {
+        int loaded = 0;
+        for (int i = 0; i < (int)cnt; i++) {
+            char key[8];
+            snprintf(key, sizeof(key), "p_%d", i);
+            uint32_t bits;
+            if (nvs_get_u32(h, key, &bits) == ESP_OK) {
+                float w;
+                memcpy(&w, &bits, sizeof(w));
+                if (w >= 0.1f && w <= 99.9f)
+                    s_weights[loaded++] = w;
+            }
+        }
+        if (loaded > 0) s_count = loaded;
+    }
+    nvs_close(h);
+    if (s_active >= s_count) s_active = 0;
+}
+
+void screen_main_add_preset(float w)
+{
+    if (s_count >= PRESET_MAX) return;
+    s_weights[s_count++] = w;
+    s_active = s_count - 1;
+    presets_save_nvs();
+}
+
+void screen_main_edit_preset(int idx, float w)
+{
+    if (idx < 0 || idx >= s_count) return;
+    s_weights[idx] = w;
+    presets_save_nvs();
+}
+
+void screen_main_delete_preset(int idx)
+{
+    if (idx < 0 || idx >= s_count) return;
+    for (int i = idx; i < s_count - 1; i++)
+        s_weights[i] = s_weights[i + 1];
+    s_count--;
+    if (s_count == 0) { s_weights[0] = 18.0f; s_count = 1; } /* always keep 1 */
+    if (s_active >= s_count) s_active = s_count - 1;
+    presets_save_nvs();
 }

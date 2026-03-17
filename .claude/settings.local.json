@@ -8,7 +8,9 @@
       "WebFetch(domain:raw.githubusercontent.com)",
       "Bash(gh api:*)",
       "WebFetch(domain:api.github.com)",
-      "Bash(source .venv/bin/activate && pio run -e waveshare_28b -t clean 2>&1 | tail -3 && pio run -e waveshare_28b 2>&1 | tail -10)"
+      "Bash(source .venv/bin/activate && pio run -e waveshare_28b -t clean 2>&1 | tail -3 && pio run -e waveshare_28b 2>&1 | tail -10)",
+      "Bash(pio run:*)",
+      "Bash(xargs cat:*)"
     ]
   }
 }

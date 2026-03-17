@@ -15,6 +15,7 @@ idf_component_register(
          "ui/screen_calibration.c"
          "ui/screen_wifi.c"
          "ui/wifi_portal.c"
+         "ui/screen_preset_edit.c"
          "ui/screen_ota.c"
          "ui/web_server.c"
          "ui/display_manager.c"
