@@ -56,8 +56,11 @@ static void poll_cb(lv_timer_t *t)
                                  : grind_ctrl_get_live_weight();
     }
 
+    /* Round to 0.1 g to suppress sub-digit jitter on the display */
+    w = (float)((int)(w * 10.0f + (w >= 0 ? 0.5f : -0.5f))) / 10.0f;
+
     char buf[16];
-    snprintf(buf, sizeof(buf), "%.2f g", w);
+    snprintf(buf, sizeof(buf), "%.1f g", w);
     lv_label_set_text(s_lbl_weight, buf);
 }
 

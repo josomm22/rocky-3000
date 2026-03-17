@@ -84,9 +84,9 @@ static volatile float s_latest_weight = 0.0f;
  * Reduces white noise by √8 ≈ 2.8× before EMA runs. */
 #define HX711_AVG_SAMPLES  16
 
-/* EMA on top of the block average: α=0.2 → light smoothing of
- * any remaining inter-block variation. */
-#define HX711_EMA_ALPHA  0.2f
+/* EMA on top of the block average: α=0.5 → one block period (~200 ms)
+ * to settle; the 16-sample block average already handles noise. */
+#define HX711_EMA_ALPHA  1.0f
 
 static void hx711_task(void *arg)
 {
