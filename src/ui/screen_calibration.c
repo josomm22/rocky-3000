@@ -91,6 +91,7 @@ static void update_title(void)
 static void go_step2(lv_event_t *e)
 {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    grind_ctrl_tare();   /* user confirmed scale is empty — re-zero now */
     s_step = 2;
     update_title();
     s_lbl_weight = NULL;
@@ -405,6 +406,8 @@ void screen_calibration_load(void)
     s_known_g     = 20.0f;
     s_raw_reading = 0.0f;
     s_cal_factor  = 1.0f;
+
+    grind_ctrl_tare();   /* zero the scale on entry */
 
     lv_obj_t *scr = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr, COL_BG, LV_PART_MAIN | LV_STATE_DEFAULT);

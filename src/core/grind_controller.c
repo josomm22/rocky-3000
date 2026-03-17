@@ -44,7 +44,8 @@
 
 /* Declared here so hx711_task (real mode) can read it before the rest of
  * the module state block. */
-static volatile float s_cal_factor = 1.0f;
+static volatile float s_cal_factor    = 0.000386f;  /* ~20 g / 176 displayed; tune via calibration screen */
+static volatile bool  s_tare_requested = false;
 
 #if GRIND_DEMO_MODE
 /* Simulated grind speed — realistic espresso dose in ~6 s */
@@ -78,9 +79,13 @@ static volatile float s_cal_factor = 1.0f;
  */
 static volatile float s_latest_weight = 0.0f;
 
-/* EMA smoothing: α=0.2 → τ ≈ 4 samples (50 ms at 80 Hz).
- * Reduces per-sample noise ~2.2× while staying fast enough for
- * threshold detection and the 100 ms display refresh. */
+/* Block-average this many consecutive HX711 conversions before EMA.
+ * 8 samples × 12.5 ms = 100 ms per update — matches the display rate.
+ * Reduces white noise by √8 ≈ 2.8× before EMA runs. */
+#define HX711_AVG_SAMPLES  16
+
+/* EMA on top of the block average: α=0.2 → light smoothing of
+ * any remaining inter-block variation. */
 #define HX711_EMA_ALPHA  0.2f
 
 static void hx711_task(void *arg)
@@ -97,10 +102,28 @@ static void hx711_task(void *arg)
     s_latest_weight = g;
 
     while (1) {
-        if (hx711_read_grams(s_cal_factor, &g))
-            s_latest_weight = HX711_EMA_ALPHA * g
+        if (s_tare_requested) {
+            hx711_tare();
+            s_latest_weight  = 0.0f;
+            s_tare_requested = false;
+        }
+
+        /* Collect HX711_AVG_SAMPLES readings, blocking on each conversion. */
+        float sum = 0.0f;
+        int   n   = 0;
+        for (int i = 0; i < HX711_AVG_SAMPLES; i++) {
+            while (!hx711_is_ready())
+                vTaskDelay(1);
+            if (hx711_read_grams(s_cal_factor, &g)) {
+                sum += g;
+                n++;
+            }
+        }
+        if (n > 0) {
+            float avg = sum / (float)n;
+            s_latest_weight = HX711_EMA_ALPHA * avg
                               + (1.0f - HX711_EMA_ALPHA) * s_latest_weight;
-        vTaskDelay(pdMS_TO_TICKS(HX711_POLL_MS));
+        }
     }
 }
 #endif  /* !GRIND_DEMO_MODE */
@@ -310,7 +333,7 @@ float grind_ctrl_get_cal_factor(void) { return s_cal_factor; }
 
 void grind_ctrl_set_cal_factor(float f)
 {
-    s_cal_factor = clampf(f, 0.1f, 10.0f);
+    s_cal_factor = clampf(f, 0.00001f, 10.0f);
     /* TODO (real mode): persist to NVS, apply to hx711_task */
 }
 
@@ -320,6 +343,13 @@ float grind_ctrl_get_live_weight(void)
     return s_weight;   /* 0.0 when idle; rises during a grind */
 #else
     return (float)s_latest_weight;
+#endif
+}
+
+void grind_ctrl_tare(void)
+{
+#if !GRIND_DEMO_MODE
+    s_tare_requested = true;
 #endif
 }
 
