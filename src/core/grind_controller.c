@@ -143,6 +143,10 @@ static lv_timer_t    *s_timer   = NULL;
 #define SETTLE_TICKS  2
 static int            s_settle_ticks = 0;
 
+/* Tare-settle before grind */
+#define TARE_SETTLE_MS  1000
+static lv_timer_t    *s_tare_timer   = NULL;
+
 /* Purge */
 #define PURGE_DURATION_MS  1500
 static bool           s_purging      = false;
@@ -240,6 +244,18 @@ static void poll_cb(lv_timer_t *t)
     }
 }
 
+/* ── Tare-settle callback ────────────────────────────────────── */
+
+static void tare_done_cb(lv_timer_t *t)
+{
+    (void)t;
+    s_tare_timer = NULL;   /* auto-deleted (repeat_count = 1) */
+    if (s_state != GRIND_TARING)
+        return;
+    s_state = GRIND_RUNNING;
+    ssr_set(1);
+}
+
 /* ── Public API ─────────────────────────────────────────────── */
 
 void grind_ctrl_init(void)
@@ -271,21 +287,34 @@ void grind_ctrl_init(void)
 
 void grind_ctrl_start(float target_g)
 {
-    if (s_state == GRIND_RUNNING)
+    if (s_state == GRIND_RUNNING || s_state == GRIND_TARING)
         return;
 
     s_target       = target_g;
     s_weight       = 0.0f;
     s_result       = 0.0f;
     s_settle_ticks = 0;
-    s_state        = GRIND_RUNNING;
+    s_state        = GRIND_TARING;
 
-    ssr_set(1);
+    grind_ctrl_tare();
+
+    s_tare_timer = lv_timer_create(tare_done_cb, TARE_SETTLE_MS, NULL);
+    lv_timer_set_repeat_count(s_tare_timer, 1);
     lv_timer_resume(s_timer);
 }
 
 void grind_ctrl_stop(void)
 {
+    if (s_state == GRIND_TARING) {
+        if (s_tare_timer) {
+            lv_timer_delete(s_tare_timer);
+            s_tare_timer = NULL;
+        }
+        s_state = GRIND_IDLE;
+        lv_timer_pause(s_timer);
+        return;
+    }
+
     if (s_state != GRIND_RUNNING)
         return;
 

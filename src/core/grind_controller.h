@@ -14,9 +14,10 @@
 #include <stdbool.h>
 
 typedef enum {
-    GRIND_IDLE = 0,  /* waiting for user to start       */
-    GRIND_RUNNING,   /* SSR on, weight rising            */
-    GRIND_DONE,      /* SSR off, final weight recorded   */
+    GRIND_IDLE = 0,  /* waiting for user to start                  */
+    GRIND_TARING,    /* tare requested; 1 s settle before SSR on   */
+    GRIND_RUNNING,   /* SSR on, weight rising                      */
+    GRIND_DONE,      /* SSR off, final weight recorded             */
 } grind_state_t;
 
 /*

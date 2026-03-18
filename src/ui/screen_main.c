@@ -175,7 +175,11 @@ static void grind_poll_cb(lv_timer_t *t)
 
     grind_state_t state = grind_ctrl_get_state();
 
-    if (state == GRIND_RUNNING) {
+    if (state == GRIND_TARING) {
+        lv_label_set_text(s_lbl_grind, "TARE");
+        set_grinding_ui(true);
+    }
+    else if (state == GRIND_RUNNING) {
         float w = grind_ctrl_get_weight();
         w = (float)((int)(w * 10.0f + (w >= 0 ? 0.5f : -0.5f))) / 10.0f;
         char buf[16];
@@ -237,7 +241,7 @@ static void grind_cb(lv_event_t *e)
         return;
 
     grind_ctrl_start(s_weights[s_active]);
-    lv_label_set_text(s_lbl_grind, "0.0g");
+    lv_label_set_text(s_lbl_grind, "TARE");
     set_grinding_ui(true);
 }
 
