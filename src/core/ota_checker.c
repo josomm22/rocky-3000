@@ -308,7 +308,7 @@ void ota_checker_start(void)
 {
     if (s_state != OTA_CHECK_IDLE) return;
     s_state = OTA_CHECK_CHECKING;
-    xTaskCreate(check_task, "ota_check", 8192, NULL, 3, NULL);
+    xTaskCreate(check_task, "ota_check", 16384, NULL, 3, NULL);
 }
 
 ota_check_state_t ota_checker_get_state(void)   { return s_state; }
