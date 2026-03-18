@@ -417,18 +417,23 @@ static esp_err_t handle_update(httpd_req_t *req)
 
 /* ── Startup ──────────────────────────────────────────────────── */
 
+static httpd_handle_t s_server = NULL;
+
+httpd_handle_t web_server_get_handle(void) { return s_server; }
+
 void web_server_start(void)
 {
     httpd_config_t cfg       = HTTPD_DEFAULT_CONFIG();
     cfg.recv_wait_timeout    = 60;
     cfg.send_wait_timeout    = 10;
-    cfg.max_uri_handlers     = 8;
+    cfg.max_uri_handlers     = 16;   /* room for portal routes too */
+    cfg.uri_match_fn         = httpd_uri_match_wildcard;
 
-    httpd_handle_t server = NULL;
-    if (httpd_start(&server, &cfg) != ESP_OK) {
+    if (httpd_start(&s_server, &cfg) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start HTTP server");
         return;
     }
+    httpd_handle_t server = s_server;
 
     static const httpd_uri_t history_uri = {
         .uri = "/history", .method = HTTP_GET, .handler = handle_history

@@ -79,6 +79,9 @@ static void on_wifi_event(void *arg, esp_event_base_t base,
     if (id == WIFI_EVENT_STA_DISCONNECTED)
     {
         s_disconnected = true;
+        /* Auto-retry unless AP/portal mode is active */
+        if (!s_ap_mode && s_wifi_inited)
+            esp_wifi_connect();
     }
 }
 

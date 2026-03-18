@@ -310,12 +310,15 @@ static void update_poll_cb(lv_timer_t *t)
         lv_obj_center(lbl);
     }
 
-    /* Show download progress overlay */
-    if (state == OTA_CHECK_DOWNLOADING ||
-        state == OTA_CHECK_DONE        ||
-        state == OTA_CHECK_ERROR) {
+    /* Full-screen overlay only during an active download */
+    if (state == OTA_CHECK_DOWNLOADING || state == OTA_CHECK_DONE) {
 
         if (!s_update_overlay) {
+            /* Hide banner — overlay takes over */
+            if (s_update_banner) {
+                lv_obj_add_flag(s_update_banner, LV_OBJ_FLAG_HIDDEN);
+            }
+
             s_update_overlay = lv_obj_create(s_scr);
             lv_obj_set_size(s_update_overlay, SCR_W, SCR_H);
             lv_obj_align(s_update_overlay, LV_ALIGN_CENTER, 0, 0);
@@ -358,17 +361,22 @@ static void update_poll_cb(lv_timer_t *t)
                      ota_checker_get_version(), pct);
             lv_label_set_text(s_update_lbl, buf);
             lv_bar_set_value(s_update_bar, pct, LV_ANIM_OFF);
-        } else if (state == OTA_CHECK_DONE) {
+        } else {
             lv_label_set_text(s_update_lbl,
                               "Update complete \xe2\x80\x94 rebooting\xe2\x80\xa6");
             lv_obj_set_style_text_color(s_update_lbl, COL_ACCENT,
                                         LV_PART_MAIN | LV_STATE_DEFAULT);
             lv_bar_set_value(s_update_bar, 100, LV_ANIM_OFF);
-        } else {
-            lv_label_set_text(s_update_lbl, "Update failed. Try again later.");
-            lv_obj_set_style_text_color(s_update_lbl, COL_ERROR,
-                                        LV_PART_MAIN | LV_STATE_DEFAULT);
         }
+    }
+
+    /* Download error — brief toast, don't block the screen */
+    if (state == OTA_CHECK_ERROR && s_update_overlay) {
+        lv_obj_delete(s_update_overlay);
+        s_update_overlay = NULL;
+        s_update_bar     = NULL;
+        s_update_lbl     = NULL;
+        if (s_update_banner) lv_obj_remove_flag(s_update_banner, LV_OBJ_FLAG_HIDDEN);
     }
 }
 

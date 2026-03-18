@@ -17,6 +17,7 @@
  */
 
 #include "wifi_portal.h"
+#include "web_server.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -39,7 +40,6 @@ static const char *TAG = "wifi_portal";
 
 /* ── State ────────────────────────────────────────────────────── */
 static esp_netif_t *s_ap_netif = NULL;
-static httpd_handle_t s_server = NULL;
 static bool s_running = false;
 
 static SemaphoreHandle_t s_result_mutex = NULL;
@@ -360,7 +360,10 @@ void wifi_portal_start(void)
     s_result_ssid[0] = '\0';
     s_result_pass[0] = '\0';
 
-    /* Switch to APSTA so we can scan while serving the AP */
+    /* Stop WiFi, switch to APSTA, then restart.
+     * esp_wifi_start() fails if called while already running, so we must
+     * stop first to apply the mode change. */
+    esp_wifi_stop();
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
 
     /* Configure the soft-AP */
@@ -380,24 +383,21 @@ void wifi_portal_start(void)
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    /* Start HTTP server */
-    httpd_config_t hcfg = HTTPD_DEFAULT_CONFIG();
-    hcfg.max_uri_handlers = 8;
-    hcfg.uri_match_fn = httpd_uri_match_wildcard;
-
-    if (httpd_start(&s_server, &hcfg) != ESP_OK)
+    /* Register portal routes on the shared web server (already on port 80) */
+    httpd_handle_t server = web_server_get_handle();
+    if (!server)
     {
-        ESP_LOGE(TAG, "Failed to start HTTP server");
+        ESP_LOGE(TAG, "Web server not running — cannot register portal routes");
         return;
     }
 
-    httpd_uri_t root_uri = {.uri = "/", .method = HTTP_GET, .handler = handle_root};
-    httpd_uri_t connect_uri = {.uri = "/connect", .method = HTTP_POST, .handler = handle_connect};
-    httpd_uri_t redir_uri = {.uri = "/*", .method = HTTP_GET, .handler = handle_redirect};
+    httpd_uri_t root_uri    = {.uri = "/",        .method = HTTP_GET,  .handler = handle_root};
+    httpd_uri_t connect_uri = {.uri = "/connect",  .method = HTTP_POST, .handler = handle_connect};
+    httpd_uri_t redir_uri   = {.uri = "/*",        .method = HTTP_GET,  .handler = handle_redirect};
 
-    httpd_register_uri_handler(s_server, &root_uri);
-    httpd_register_uri_handler(s_server, &connect_uri);
-    httpd_register_uri_handler(s_server, &redir_uri);
+    httpd_register_uri_handler(server, &root_uri);
+    httpd_register_uri_handler(server, &connect_uri);
+    httpd_register_uri_handler(server, &redir_uri);
 
     /* Trigger a network scan in the background */
     xTaskCreate(scan_task, "portal_scan", 4096, NULL, 5, NULL);
@@ -411,10 +411,13 @@ void wifi_portal_stop(void)
     if (!s_running)
         return;
 
-    if (s_server)
+    /* Unregister portal routes from the shared web server */
+    httpd_handle_t server = web_server_get_handle();
+    if (server)
     {
-        httpd_stop(s_server);
-        s_server = NULL;
+        httpd_unregister_uri_handler(server, "/",        HTTP_GET);
+        httpd_unregister_uri_handler(server, "/connect",  HTTP_POST);
+        httpd_unregister_uri_handler(server, "/*",        HTTP_GET);
     }
 
     esp_wifi_set_mode(WIFI_MODE_STA);

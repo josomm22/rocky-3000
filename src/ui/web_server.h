@@ -23,5 +23,11 @@ extern volatile int  web_server_ota_pct;    /* 0–100                   */
 extern volatile bool web_server_ota_done;   /* flash write + swap done  */
 extern volatile bool web_server_ota_error;  /* any OTA error            */
 
-void web_server_start(void);
-void web_server_reset_ota_state(void);
+void            web_server_start(void);
+void            web_server_reset_ota_state(void);
+
+/* Returns the running httpd handle so other modules (e.g. wifi_portal)
+ * can register/unregister URI handlers on the same server instance.
+ * Returns NULL if the server has not started yet. */
+#include "esp_http_server.h"
+httpd_handle_t  web_server_get_handle(void);
