@@ -179,11 +179,14 @@ static void grind_poll_cb(lv_timer_t *t)
         lv_label_set_text(s_lbl_grind, "TARE");
         set_grinding_ui(true);
     }
-    else if (state == GRIND_RUNNING) {
+    else if (state == GRIND_RUNNING || state == GRIND_SETTLING || state == GRIND_PULSING) {
         float w = grind_ctrl_get_weight();
         w = (float)((int)(w * 10.0f + (w >= 0 ? 0.5f : -0.5f))) / 10.0f;
         char buf[16];
-        snprintf(buf, sizeof(buf), "%.1fg", w);
+        if (state == GRIND_PULSING)
+            snprintf(buf, sizeof(buf), "~%.1fg", w);
+        else
+            snprintf(buf, sizeof(buf), "%.1fg", w);
         lv_label_set_text(s_lbl_grind, buf);
         set_grinding_ui(true);
     }

@@ -32,12 +32,27 @@
 #define GRIND_DEMO_MODE 0
 #endif
 
-/* Pre-stop offset defaults & clamps */
-#define DEFAULT_OFFSET_G  0.3f
+/* Pre-stop residual bias (on top of dynamic coast prediction).
+ * Starts at 0; auto-tune adjusts it to absorb any remaining systematic error. */
+#define DEFAULT_OFFSET_G  0.0f
 #define AUTOTUNE_FACTOR   0.5f
 #define AUTOTUNE_DEADBAND 0.1f   /* ignore deltas smaller than this (g) */
-#define OFFSET_MIN_G      0.0f
-#define OFFSET_MAX_G      5.0f
+#define OFFSET_MIN_G     -2.0f
+#define OFFSET_MAX_G      2.0f
+
+/* Dynamic coast prediction: stop_at = target - coast_g - s_offset
+ *   coast_g = (motor_latency_ms / 1000) × flow_rate_g_s × COAST_RATIO
+ * Falls back to COAST_FALLBACK_G when flow rate is not yet available. */
+#define MOTOR_LATENCY_MS_DEFAULT  100.0f
+#define COAST_RATIO               1.0f
+#define COAST_FALLBACK_G          0.3f   /* used when flow rate == 0 */
+
+/* Pulse refinement: short correction bursts after the main stop */
+#define PULSE_MIN_G        0.15f  /* below this shortfall → skip pulse      */
+#define PULSE_MAX_ATTEMPTS 3      /* safety cap on correction loops         */
+#define PULSE_MIN_MS       30     /* shortest meaningful SSR pulse (ms)     */
+#define PULSE_MAX_MS       500    /* safety cap (ms)                        */
+#define PULSE_FACTOR       0.8f   /* intentional undershoot per pulse       */
 
 /* UI display refresh via LVGL timer (does NOT affect HX711 sample rate) */
 #define UI_POLL_MS  100
@@ -73,11 +88,10 @@ static volatile bool  s_tare_requested = false;
 
 /*
  * Shared between hx711_task (writer) and the LVGL poll timer (reader).
- * A single float write on ESP32 is atomic at the hardware level, so no
- * mutex is needed — worst case the LVGL timer reads a sample one cycle
- * stale, which is 12.5 ms and completely irrelevant.
+ * Single float writes on ESP32 are atomic — no mutex needed.
  */
-static volatile float s_latest_weight = 0.0f;
+static volatile float s_latest_weight  = 0.0f;
+static volatile float s_flow_rate_g_s  = 0.0f;  /* g/s, updated each block */
 
 /* Block-average this many consecutive HX711 conversions before EMA.
  * 8 samples × 12.5 ms = 100 ms per update — matches the display rate.
@@ -123,6 +137,14 @@ static void hx711_task(void *arg)
             float avg = sum / (float)n;
             s_latest_weight = HX711_EMA_ALPHA * avg
                               + (1.0f - HX711_EMA_ALPHA) * s_latest_weight;
+
+            /* Flow rate: weight delta over the fixed block period.
+             * Block period = HX711_AVG_SAMPLES / HX711_POLL_HZ (seconds). */
+            static float prev_block_weight = 0.0f;
+            float dt_s = (float)HX711_AVG_SAMPLES / (float)HX711_POLL_HZ;
+            float rate = (avg - prev_block_weight) / dt_s;
+            s_flow_rate_g_s = (rate > 0.0f) ? rate : 0.0f;
+            prev_block_weight = avg;
         }
     }
 }
@@ -132,16 +154,20 @@ static void hx711_task(void *arg)
 
 static grind_state_t  s_state      = GRIND_IDLE;
 static float          s_target     = 18.0f;
-static float          s_offset  = DEFAULT_OFFSET_G;
-static float          s_weight  = 0.0f;   /* snapshot read by UI / grind logic */
-static float          s_result  = 0.0f;
-static lv_timer_t    *s_timer   = NULL;
+static float          s_offset     = DEFAULT_OFFSET_G;   /* residual bias, auto-tuned */
+static float          s_motor_latency_ms = MOTOR_LATENCY_MS_DEFAULT;
+static float          s_weight     = 0.0f;
+static float          s_result     = 0.0f;
+static lv_timer_t    *s_timer      = NULL;
 
-/* Coast settle (real mode only): ticks remaining after SSR cutoff before
- * reading the final weight.  2 × UI_POLL_MS = 200 ms, avoids blocking
- * the LVGL task with vTaskDelay. */
+/* Settle countdown: ticks remaining after SSR cutoff (main stop or pulse)
+ * before reading the final/inter-pulse weight.  2 × UI_POLL_MS = 200 ms. */
 #define SETTLE_TICKS  2
-static int            s_settle_ticks = 0;
+static int            s_settle_ticks  = 0;
+
+/* Pulse refinement */
+static int            s_pulse_attempts = 0;
+static lv_timer_t    *s_pulse_timer    = NULL;
 
 /* Tare-settle before grind */
 #define TARE_SETTLE_MS  1000
@@ -188,58 +214,112 @@ static float lcg_noise(void)
 }
 #endif
 
+/* ── Pulse refinement callbacks ─────────────────────────────── */
+
+/* Called when a correction pulse timer expires — SSR off, begin re-settle */
+static void pulse_done_cb(lv_timer_t *t)
+{
+    (void)t;
+    s_pulse_timer = NULL;   /* auto-deleted (repeat_count = 1) */
+    ssr_set(0);
+    s_pulse_attempts++;
+    s_settle_ticks = SETTLE_TICKS;
+    s_state        = GRIND_SETTLING;
+}
+
+/*
+ * Called when the settle countdown reaches zero (after main stop or pulse).
+ * Decides: fire another correction pulse, or declare GRIND_DONE.
+ */
+static void settle_complete(void)
+{
+    float shortfall = s_target - s_weight;
+    float flow      = (float)s_flow_rate_g_s;
+
+    if (shortfall > PULSE_MIN_G
+        && s_pulse_attempts < PULSE_MAX_ATTEMPTS
+        && flow > 0.01f)
+    {
+        float pulse_ms = (shortfall / flow) * 1000.0f * PULSE_FACTOR;
+        pulse_ms = clampf(pulse_ms, (float)PULSE_MIN_MS, (float)PULSE_MAX_MS);
+
+        s_state       = GRIND_PULSING;
+        ssr_set(1);
+        s_pulse_timer = lv_timer_create(pulse_done_cb, (uint32_t)pulse_ms, NULL);
+        lv_timer_set_repeat_count(s_pulse_timer, 1);
+    }
+    else
+    {
+        s_result = s_weight;
+        run_autotune();
+        s_state = GRIND_DONE;
+    }
+}
+
 /* ── LVGL poll timer (UI_POLL_MS, ~10 Hz) ───────────────────── */
 /*
- * In real mode this just snapshots s_latest_weight, which the 80 Hz
- * hx711_task has been keeping up-to-date independently.
- * The SSR cut-off decision is therefore also made here at ~10 Hz — fine
- * for espresso doses where the grinder coasts ~0.1–0.3 g after cutoff.
- * If you need sub-100 ms cut-off precision, move the threshold check into
- * hx711_task and signal via an EventGroup bit.
+ * In real mode: snapshots s_latest_weight (kept current by the 80 Hz
+ * hx711_task).  The stop / settle / pulse decisions run here at ~10 Hz —
+ * adequate for espresso doses.
  */
 static void poll_cb(lv_timer_t *t)
 {
     (void)t;
 
+    /* ── GRIND_SETTLING: wait for scale to stabilise ── */
+    if (s_state == GRIND_SETTLING) {
 #if !GRIND_DEMO_MODE
-    /* Waiting for coast-settle after SSR cutoff: count down ticks then
-     * record the final weight.  s_state stays RUNNING during this window
-     * so the display keeps refreshing. */
-    if (s_settle_ticks > 0) {
         s_weight = (float)s_latest_weight;
-        if (--s_settle_ticks == 0) {
-            s_result = s_weight;
-            run_autotune();
-            s_state = GRIND_DONE;
-        }
+#endif
+        if (--s_settle_ticks == 0)
+            settle_complete();
         return;
     }
+
+    /* ── GRIND_PULSING: SSR on, weight rising again ── */
+    if (s_state == GRIND_PULSING) {
+#if GRIND_DEMO_MODE
+        float inc = DEMO_RAMP_G_PER_SEC * (UI_POLL_MS / 1000.0f);
+        s_weight += inc + lcg_noise() * DEMO_NOISE_AMP;
+        if (s_weight < 0.0f) s_weight = 0.0f;
+#else
+        s_weight = (float)s_latest_weight;
 #endif
+        return;
+    }
 
     if (s_state != GRIND_RUNNING)
         return;
 
+    /* ── GRIND_RUNNING: update weight snapshot ── */
 #if GRIND_DEMO_MODE
     float inc   = DEMO_RAMP_G_PER_SEC * (UI_POLL_MS / 1000.0f);
     float noise = lcg_noise() * DEMO_NOISE_AMP;
     s_weight += inc + noise;
     if (s_weight < 0.0f) s_weight = 0.0f;
+    s_flow_rate_g_s = DEMO_RAMP_G_PER_SEC;
 #else
-    /* Snapshot the latest reading from the 80 Hz task */
     s_weight = (float)s_latest_weight;
 #endif
 
-    float stop_at = s_target - s_offset;
+    /* Dynamic stop threshold: coast_g = latency × flow_rate × ratio.
+     * Falls back to COAST_FALLBACK_G until flow rate is established. */
+    float flow    = (float)s_flow_rate_g_s;
+    float coast_g = (flow > 0.01f)
+                    ? (s_motor_latency_ms / 1000.0f) * flow * COAST_RATIO
+                    : COAST_FALLBACK_G;
+    float stop_at = s_target - coast_g - s_offset;
+
     if (s_weight >= stop_at) {
         ssr_set(0);
+        s_pulse_attempts = 0;
+        s_settle_ticks   = SETTLE_TICKS;
+        s_state          = GRIND_SETTLING;
+
 #if GRIND_DEMO_MODE
-        s_result = stop_at + DEMO_OVERSHOOT_G + lcg_noise() * 0.05f;
-        if (s_result < 0.0f) s_result = 0.0f;
-        run_autotune();
-        s_state = GRIND_DONE;
-#else
-        /* Start coast-settle countdown; result recorded after SETTLE_TICKS */
-        s_settle_ticks = SETTLE_TICKS;
+        /* Simulate mechanical overshoot so the settled weight is realistic */
+        s_weight = stop_at + coast_g + DEMO_OVERSHOOT_G + lcg_noise() * 0.05f;
+        if (s_weight < 0.0f) s_weight = 0.0f;
 #endif
     }
 }
@@ -290,11 +370,12 @@ void grind_ctrl_start(float target_g)
     if (s_state == GRIND_RUNNING || s_state == GRIND_TARING)
         return;
 
-    s_target       = target_g;
-    s_weight       = 0.0f;
-    s_result       = 0.0f;
-    s_settle_ticks = 0;
-    s_state        = GRIND_TARING;
+    s_target         = target_g;
+    s_weight         = 0.0f;
+    s_result         = 0.0f;
+    s_settle_ticks   = 0;
+    s_pulse_attempts = 0;
+    s_state          = GRIND_TARING;
 
     grind_ctrl_tare();
 
@@ -315,13 +396,24 @@ void grind_ctrl_stop(void)
         return;
     }
 
-    if (s_state != GRIND_RUNNING)
-        return;
+    /* Cancel any in-flight pulse timer */
+    if (s_pulse_timer) {
+        lv_timer_delete(s_pulse_timer);
+        s_pulse_timer = NULL;
+    }
 
-    ssr_set(0);
-    s_result = s_weight;
-    run_autotune();
-    s_state = GRIND_DONE;
+    /* Turn off SSR if it was on */
+    if (s_state == GRIND_RUNNING || s_state == GRIND_PULSING)
+        ssr_set(0);
+
+    if (s_state == GRIND_RUNNING
+        || s_state == GRIND_SETTLING
+        || s_state == GRIND_PULSING)
+    {
+        s_result = s_weight;
+        run_autotune();
+        s_state = GRIND_DONE;
+    }
 }
 
 /* ── Purge ──────────────────────────────────────────────────── */
@@ -391,12 +483,28 @@ bool grind_ctrl_is_demo(void)
 #endif
 }
 
+float grind_ctrl_get_flow_rate(void)
+{
+    return (float)s_flow_rate_g_s;
+}
+
+float grind_ctrl_get_motor_latency(void)
+{
+    return s_motor_latency_ms;
+}
+
+void grind_ctrl_set_motor_latency(float ms)
+{
+    s_motor_latency_ms = clampf(ms, 10.0f, 500.0f);
+}
+
 void grind_ctrl_ack_done(void)
 {
     if (s_state != GRIND_DONE)
         return;
 
-    s_state  = GRIND_IDLE;
-    s_weight = 0.0f;
+    s_state          = GRIND_IDLE;
+    s_weight         = 0.0f;
+    s_pulse_attempts = 0;
     lv_timer_pause(s_timer);
 }
