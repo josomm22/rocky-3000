@@ -76,7 +76,7 @@ static bool json_str_field(const char *json, const char *key,
                             char *out, size_t out_len)
 {
     char search[64];
-    snprintf(search, sizeof(search), "\"%s\":\"", key);
+    snprintf(search, sizeof(search), "\"%s\": \"", key);
     const char *p = strstr(json, search);
     if (!p) return false;
     p += strlen(search);
@@ -92,7 +92,7 @@ static bool json_str_field(const char *json, const char *key,
 /* Scans for the first browser_download_url whose value ends in ".bin". */
 static bool find_bin_url(const char *json, char *out, size_t out_len)
 {
-    const char *KEY = "\"browser_download_url\":\"";
+    const char *KEY = "\"browser_download_url\": \"";
     const char *q = json;
     while ((q = strstr(q, KEY)) != NULL) {
         q += strlen(KEY);
@@ -249,11 +249,12 @@ static void dl_task(void *arg)
     ESP_LOGI(TAG, "Starting OTA download from %s", s_bin_url);
 
     esp_http_client_config_t http_cfg = {
-        .url               = s_bin_url,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .timeout_ms        = 60000,
-        .keep_alive_enable = true,
-        .buffer_size       = 4096,
+        .url                  = s_bin_url,
+        .crt_bundle_attach    = esp_crt_bundle_attach,
+        .timeout_ms           = 60000,
+        .keep_alive_enable    = true,
+        .buffer_size          = 4096,
+        .max_redirection_count = 5,
     };
     esp_https_ota_config_t ota_cfg = {
         .http_config = &http_cfg,

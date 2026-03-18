@@ -11,7 +11,8 @@
       "Bash(source .venv/bin/activate && pio run -e waveshare_28b -t clean 2>&1 | tail -3 && pio run -e waveshare_28b 2>&1 | tail -10)",
       "Bash(pio run:*)",
       "Bash(xargs cat:*)",
-      "Bash(git:*)"
+      "Bash(git:*)",
+      "Bash(~/.platformio/penv/Scripts/pio run:*)"
     ]
   }
 }
