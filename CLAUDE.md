@@ -20,9 +20,26 @@ pio device monitor -b 115200
 
 # Clean build
 pio run -e waveshare_28b -t clean
+
+# Run host-native unit tests (no hardware needed)
+pio test -e native
 ```
 
-There are no unit tests. Validation is done via serial monitor and on-device observation.
+## Testing
+
+Host-native unit tests live in `test/` and run via `pio test -e native` — no ESP32 or toolchain required.
+
+| Suite | File | What it tests |
+|-------|------|---------------|
+| `test_grind_history` | `test/test_grind_history/test_grind_history.c` | `grind_history.c` circular buffer: init, record, ordering, wrap at 50, clear, get with limit |
+| `test_autotune` | `test/test_autotune/test_autotune.c` | Auto-tune offset math: overshoot/undershoot, deadband, min/max clamp, convergence |
+
+**Test infrastructure:**
+- `test/unity/unity.h` — minimal Unity-compatible framework (header-only, no `.c` file)
+- `test/test_grind_history/nvs_stub.c` — NVS stub: writes are no-ops, reads return `NOT_FOUND` (simulates empty NVS so `grind_history_init()` starts clean)
+- Stub headers (`nvs.h`, `nvs_flash.h`, `esp_err.h`) live alongside the test suite so ESP-IDF types are available without the full SDK
+
+To add a new test suite: create `test/test_<name>/`, symlink `unity.h` from `test/unity/`, add any needed stubs, write tests with `setUp`/`tearDown`/`main()` calling `UNITY_BEGIN`/`RUN_TEST`/`UNITY_END`.
 
 ## Architecture
 

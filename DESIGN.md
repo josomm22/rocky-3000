@@ -444,6 +444,18 @@ if (live_weight >= stop_at_weight):
 ## 10. PlatformIO Configuration
 
 ```ini
+; Host-native unit tests — no hardware needed
+; Run with: pio test -e native
+[env:native]
+platform = native
+build_src_filter = -<*>
+build_flags =
+    -std=c11
+    -Wall
+    -Wno-unused-function
+    -I src/core
+    -lm
+
 [env:waveshare_28b]
 platform = espressif32@6.12.0
 board = esp32-s3-devkitc-1
@@ -458,6 +470,8 @@ board_build.partitions = partitions.csv
 ```
 
 LVGL 9.x is included as a local component under `components/lvgl__lvgl/`. HX711 is not a library dependency — the driver will be implemented directly in `grind_controller.c` when hardware is available.
+
+`build_src_filter = -<*>` in the native env prevents any `src/` files from being compiled automatically. Each test suite in `test/` symlinks directly to the source file(s) it needs, so only the module under test is compiled alongside the suite's stubs.
 
 ### LVGL Config Notes (`components/lv_conf.h`)
 
@@ -479,6 +493,21 @@ rocky-3000/
 ├── components/
 │   └── lvgl__lvgl/          # LVGL 9.x as a local ESP-IDF component
 │       └── lv_conf.h
+├── test/
+│   ├── unity/
+│   │   └── unity.h               # Minimal Unity-compatible framework (header-only)
+│   ├── test_grind_history/
+│   │   ├── test_grind_history.c  # 10 tests: init, record, ordering, wrap, clear, get
+│   │   ├── grind_history.c       # → symlink to src/core/grind_history.c
+│   │   ├── grind_history.h       # → symlink to src/core/grind_history.h
+│   │   ├── unity.h               # → symlink to test/unity/unity.h
+│   │   ├── nvs_stub.c            # NVS stub: writes no-op, reads return NOT_FOUND
+│   │   ├── nvs.h                 # ESP-IDF NVS stub header
+│   │   ├── nvs_flash.h           # ESP-IDF NVS flash stub header
+│   │   └── esp_err.h             # ESP error code stubs
+│   └── test_autotune/
+│       ├── test_autotune.c       # 9 tests: offset math, deadband, clamp, convergence
+│       └── unity.h               # → symlink to test/unity/unity.h
 └── src/
     ├── main.c               # Entry point: hw init, wifi, grind ctrl, HTTP server, LVGL loop
     ├── CMakeLists.txt       # Registers all source files as ESP-IDF component
@@ -521,7 +550,7 @@ rocky-3000/
 | 10  | ✅ Done    | WiFi + OTA          | Scan/connect/password modal; persistent HTTP OTA + history server     |
 | 11  | ✅ Done    | Persistence         | NVS for presets, offset, brightness, sleep timeout, wifi creds, history |
 | 12  | ✅ Done    | Shot history        | Circular buffer (50 records), NVS persist, web API + HTML page        |
-| 13  | ⏳ Pending | Polish & testing    | Hardware-dependent: offset tuning, preset panel, edge cases           |
+| 13  | 🔄 Started | Polish & testing    | Host unit tests added (grind_history, auto-tune); hardware integration pending |
 | 14  | ⏳ Pending | Flow-rate stop prediction | Replace fixed offset with dynamic latency-based overshoot     |
 | 15  | ⏳ Pending | Post-stop pulse refinement | Iterative short pulses to close gap on current shot          |
 | 16  | ⏳ Pending | Settling detection  | Replace fixed 200 ms delay with std-dev stability check               |
