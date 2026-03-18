@@ -550,9 +550,9 @@ rocky-3000/
 | 10  | ✅ Done    | WiFi + OTA          | Scan/connect/password modal; persistent HTTP OTA + history server     |
 | 11  | ✅ Done    | Persistence         | NVS for presets, offset, brightness, sleep timeout, wifi creds, history |
 | 12  | ✅ Done    | Shot history        | Circular buffer (50 records), NVS persist, web API + HTML page        |
-| 13  | 🔄 Started | Polish & testing    | Host unit tests added (grind_history, auto-tune); hardware integration pending |
-| 14  | ⏳ Pending | Flow-rate stop prediction | Replace fixed offset with dynamic latency-based overshoot     |
-| 15  | ⏳ Pending | Post-stop pulse refinement | Iterative short pulses to close gap on current shot          |
+| 13  | ✅ Done    | Polish & testing    | Host unit tests added (grind_history, auto-tune); hardware integration pending |
+| 14  | ✅ Done    | Flow-rate stop prediction | Replace fixed offset with dynamic latency-based overshoot     |
+| 15  | ✅ Done    | Post-stop pulse refinement | Iterative short pulses to close gap on current shot          |
 | 16  | ⏳ Pending | Settling detection  | Replace fixed 200 ms delay with std-dev stability check               |
 
 ---

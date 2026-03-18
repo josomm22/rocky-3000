@@ -14,9 +14,12 @@
 #include <stdbool.h>
 
 typedef enum {
-    GRIND_IDLE = 0,  /* waiting for user to start       */
-    GRIND_RUNNING,   /* SSR on, weight rising            */
-    GRIND_DONE,      /* SSR off, final weight recorded   */
+    GRIND_IDLE = 0,  /* waiting for user to start                         */
+    GRIND_TARING,    /* tare requested; 1 s settle before SSR on          */
+    GRIND_RUNNING,   /* SSR on, weight rising                             */
+    GRIND_SETTLING,  /* SSR off, waiting for scale to stabilise           */
+    GRIND_PULSING,   /* firing a short correction pulse                   */
+    GRIND_DONE,      /* final weight recorded                             */
 } grind_state_t;
 
 /*
@@ -56,6 +59,16 @@ void grind_ctrl_tare(void);
 
 /* True when compiled with GRIND_DEMO_MODE=1 (no real hardware). */
 bool grind_ctrl_is_demo(void);
+
+/* Live flow rate in g/s (rolling window from hx711_task; 0 in demo mode
+ * until a grind starts). Useful for diagnostics and the settings screen. */
+float grind_ctrl_get_flow_rate(void);
+
+/* Motor latency: total delay from SSR de-energise to burrs stopping (ms).
+ * Used to predict coast distance. Persisted externally via NVS.
+ * Default: 100 ms. Typical range: 30–150 ms. */
+float grind_ctrl_get_motor_latency(void);
+void  grind_ctrl_set_motor_latency(float ms);  /* clamps to [10, 500] */
 
 /*
  * Acknowledge DONE → return to IDLE.
