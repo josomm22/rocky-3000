@@ -10,6 +10,7 @@ idf_component_register(
          "core/grind_controller.c"
          "core/hx711.c"
          "core/grind_history.c"
+         "core/ota_checker.c"
          "ui/screen_main.c"
          "ui/screen_settings.c"
          "ui/screen_calibration.c"
@@ -30,4 +31,5 @@ idf_component_register(
                  "core"
                  "ui"
     REQUIRES esp_wifi esp_netif nvs_flash esp_event esp_http_server app_update
+             esp_https_ota esp_http_client mbedtls
 )
