@@ -15,6 +15,7 @@
 #include "screen_wifi.h"
 #include "screen_ota.h"
 #include "display_manager.h"
+#include "version.h"
 
 /* ── Callbacks ──────────────────────────────────────────────── */
 
@@ -291,6 +292,14 @@ void screen_settings_load(void)
                                LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_color(lbl_inc, COL_TEXT_DIM, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_center(lbl_inc);
+
+    /* ── Version label ──────────────────────────────────────────── */
+    lv_obj_t *lbl_ver = lv_label_create(scr);
+    lv_label_set_text(lbl_ver, APP_VERSION_STRING);
+    lv_obj_set_style_text_font(lbl_ver, &lv_font_montserrat_24,
+                               LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(lbl_ver, COL_TEXT_DIM, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_align(lbl_ver, LV_ALIGN_BOTTOM_MID, 0, -16);
 
     lv_scr_load(scr);
 }
