@@ -14,8 +14,8 @@
 /* ── Mirror of constants in grind_controller.c ────────────── */
 #define AUTOTUNE_FACTOR   0.5f
 #define AUTOTUNE_DEADBAND 0.1f
-#define OFFSET_MIN_G      0.0f
-#define OFFSET_MAX_G      5.0f
+#define OFFSET_MIN_G     -2.0f
+#define OFFSET_MAX_G      2.0f
 
 /* ── Replicated helpers (pure functions, no hardware deps) ─── */
 
