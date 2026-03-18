@@ -14,6 +14,7 @@
 #include "screen_preset_edit.h"
 #include "grind_controller.h"
 #include "grind_history.h"
+#include "ota_checker.h"
 
 /* ── NVS namespace for presets ──────────────────────────────── */
 #define PRESET_NVS_NS "app_cfg"
@@ -58,6 +59,13 @@ static lv_timer_t *s_wifi_poll_timer = NULL;
 static lv_timer_t *s_grind_poll      = NULL;
 static lv_timer_t *s_done_timer      = NULL;
 static lv_timer_t *s_toast_timer     = NULL;
+static lv_timer_t *s_update_poll     = NULL;
+
+/* ── OTA update UI (banner + download overlay) ──────────────── */
+static lv_obj_t   *s_update_banner   = NULL;
+static lv_obj_t   *s_update_overlay  = NULL;
+static lv_obj_t   *s_update_bar      = NULL;
+static lv_obj_t   *s_update_lbl      = NULL;
 
 /* ── Forward declarations ───────────────────────────────────── */
 static void rebuild_preset_row(void);
@@ -251,6 +259,119 @@ static void wifi_icon_poll_cb(lv_timer_t *t)
                                 LV_PART_MAIN | LV_STATE_DEFAULT);
 }
 
+static void update_install_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    ota_checker_apply();
+}
+
+static void update_poll_cb(lv_timer_t *t)
+{
+    (void)t;
+    if (!s_scr) return;
+
+    ota_check_state_t state = ota_checker_get_state();
+
+    /* Show the "update available" banner once */
+    if (state == OTA_CHECK_AVAILABLE && !s_update_banner) {
+        char buf[56];
+        snprintf(buf, sizeof(buf), LV_SYMBOL_UP " Update %s — tap to install",
+                 ota_checker_get_version());
+
+        s_update_banner = lv_button_create(s_scr);
+        lv_obj_set_width(s_update_banner, SCR_W - 24);
+        lv_obj_set_height(s_update_banner, LV_SIZE_CONTENT);
+        lv_obj_align(s_update_banner, LV_ALIGN_TOP_MID, 0, 86);
+        lv_obj_set_style_bg_color(s_update_banner, COL_ACCENT,
+                                  LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_bg_opa(s_update_banner, LV_OPA_20,
+                                LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_bg_opa(s_update_banner, LV_OPA_40,
+                                LV_PART_MAIN | LV_STATE_PRESSED);
+        lv_obj_set_style_border_color(s_update_banner, COL_ACCENT,
+                                      LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_border_width(s_update_banner, 1,
+                                      LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_radius(s_update_banner, 8,
+                                LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_ver(s_update_banner, 6,
+                                 LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_shadow_width(s_update_banner, 0,
+                                      LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_add_event_cb(s_update_banner, update_install_cb,
+                            LV_EVENT_CLICKED, NULL);
+
+        lv_obj_t *lbl = lv_label_create(s_update_banner);
+        lv_label_set_text(lbl, buf);
+        lv_obj_set_style_text_color(lbl, COL_ACCENT,
+                                    LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_24,
+                                   LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_center(lbl);
+    }
+
+    /* Show download progress overlay */
+    if (state == OTA_CHECK_DOWNLOADING ||
+        state == OTA_CHECK_DONE        ||
+        state == OTA_CHECK_ERROR) {
+
+        if (!s_update_overlay) {
+            s_update_overlay = lv_obj_create(s_scr);
+            lv_obj_set_size(s_update_overlay, SCR_W, SCR_H);
+            lv_obj_align(s_update_overlay, LV_ALIGN_CENTER, 0, 0);
+            lv_obj_set_style_bg_color(s_update_overlay, COL_BG,
+                                      LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_bg_opa(s_update_overlay, LV_OPA_COVER,
+                                    LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_border_width(s_update_overlay, 0,
+                                          LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_remove_flag(s_update_overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+            s_update_lbl = lv_label_create(s_update_overlay);
+            lv_obj_set_style_text_font(s_update_lbl, &lv_font_montserrat_24,
+                                       LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_text_color(s_update_lbl, COL_TEXT,
+                                        LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_text_align(s_update_lbl, LV_TEXT_ALIGN_CENTER,
+                                        LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_align(s_update_lbl, LV_ALIGN_CENTER, 0, -40);
+
+            s_update_bar = lv_bar_create(s_update_overlay);
+            lv_obj_set_size(s_update_bar, SCR_W - 80, 22);
+            lv_obj_align(s_update_bar, LV_ALIGN_CENTER, 0, 10);
+            lv_bar_set_range(s_update_bar, 0, 100);
+            lv_bar_set_value(s_update_bar, 0, LV_ANIM_OFF);
+            lv_obj_set_style_bg_color(s_update_bar, COL_SURFACE,
+                                      LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_bg_color(s_update_bar, COL_ACCENT,
+                                      LV_PART_INDICATOR | LV_STATE_DEFAULT);
+            lv_obj_set_style_radius(s_update_bar, 11,
+                                    LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_radius(s_update_bar, 11,
+                                    LV_PART_INDICATOR | LV_STATE_DEFAULT);
+        }
+
+        if (state == OTA_CHECK_DOWNLOADING) {
+            int pct = ota_checker_get_progress();
+            char buf[56];
+            snprintf(buf, sizeof(buf), "Downloading %s\xe2\x80\xa6 %d%%",
+                     ota_checker_get_version(), pct);
+            lv_label_set_text(s_update_lbl, buf);
+            lv_bar_set_value(s_update_bar, pct, LV_ANIM_OFF);
+        } else if (state == OTA_CHECK_DONE) {
+            lv_label_set_text(s_update_lbl,
+                              "Update complete \xe2\x80\x94 rebooting\xe2\x80\xa6");
+            lv_obj_set_style_text_color(s_update_lbl, COL_ACCENT,
+                                        LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_bar_set_value(s_update_bar, 100, LV_ANIM_OFF);
+        } else {
+            lv_label_set_text(s_update_lbl, "Update failed. Try again later.");
+            lv_obj_set_style_text_color(s_update_lbl, COL_ERROR,
+                                        LV_PART_MAIN | LV_STATE_DEFAULT);
+        }
+    }
+}
+
 static void scr_delete_cb(lv_event_t *e)
 {
     (void)e;
@@ -258,12 +379,17 @@ static void scr_delete_cb(lv_event_t *e)
     if (s_grind_poll)      { lv_timer_delete(s_grind_poll);      s_grind_poll      = NULL; }
     if (s_done_timer)      { lv_timer_delete(s_done_timer);      s_done_timer      = NULL; }
     if (s_toast_timer)     { lv_timer_delete(s_toast_timer);     s_toast_timer     = NULL; }
-    s_scr        = NULL;
-    s_lbl_wifi   = NULL;
-    s_lbl_grind  = NULL;
-    s_btn_stop   = NULL;
-    s_lbl_purge  = NULL;
-    s_toast_cont = NULL;  /* deleted with the screen */
+    if (s_update_poll)     { lv_timer_delete(s_update_poll);     s_update_poll     = NULL; }
+    s_scr           = NULL;
+    s_lbl_wifi      = NULL;
+    s_lbl_grind     = NULL;
+    s_btn_stop      = NULL;
+    s_lbl_purge     = NULL;
+    s_toast_cont    = NULL;  /* deleted with the screen */
+    s_update_banner  = NULL;
+    s_update_overlay = NULL;
+    s_update_bar     = NULL;
+    s_update_lbl     = NULL;
 }
 
 static void settings_cb(lv_event_t *e)
@@ -547,6 +673,9 @@ void screen_main_load(void)
 
     /* ── Grind state poll timer ─────────────────────────────── */
     s_grind_poll = lv_timer_create(grind_poll_cb, 100, NULL);
+
+    /* ── OTA update check poll (2 s) ────────────────────────── */
+    s_update_poll = lv_timer_create(update_poll_cb, 2000, NULL);
 
     rebuild_preset_row();
 

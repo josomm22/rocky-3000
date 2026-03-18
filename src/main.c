@@ -17,6 +17,7 @@
 #include "grind_controller.h"
 #include "grind_history.h"
 #include "web_server.h"
+#include "ota_checker.h"
 
 /* ── Entry point ────────────────────────────────────────────── */
 void app_main(void)
@@ -32,6 +33,7 @@ void app_main(void)
     grind_ctrl_init();         /* SSR safe-low + demo poll timer (paused) */
     grind_history_init();      /* load shot history from NVS              */
     web_server_start();        /* persistent HTTP server on port 80        */
+    ota_checker_start();       /* background GitHub release check          */
     screen_main_preset_init(); /* load persisted presets (before first load) */
 
     screen_main_load();
