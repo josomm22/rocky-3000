@@ -30,6 +30,7 @@ static void presets_save_nvs(void)
     nvs_handle_t h;
     if (nvs_open(PRESET_NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
     nvs_set_u8(h, "p_count", (uint8_t)s_count);
+    nvs_set_u8(h, "p_active", (uint8_t)s_active);
     for (int i = 0; i < s_count; i++) {
         char key[16];
         snprintf(key, sizeof(key), "p_%d", i);
@@ -216,6 +217,7 @@ static void preset_cb(lv_event_t *e)
         return;
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
     s_active = idx;
+    presets_save_nvs();
     apply_pill_styles();
     position_sel_frame(idx);
     lv_obj_move_foreground(s_sel_frame);
@@ -727,6 +729,9 @@ void screen_main_preset_init(void)
         }
         if (loaded > 0) s_count = loaded;
     }
+    uint8_t active = 0;
+    if (nvs_get_u8(h, "p_active", &active) == ESP_OK && (int)active < s_count)
+        s_active = (int)active;
     nvs_close(h);
     if (s_active >= s_count) s_active = 0;
 }
