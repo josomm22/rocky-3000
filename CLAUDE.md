@@ -6,6 +6,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **GBWUI (Grind By Weight UI)** — an ESP32-S3 embedded application for a coffee grinder controller. It monitors live weight via an HX711 load cell, controls the grinder via an SSR on GPIO43, and presents a touch UI on a 2.8" capacitive touch LCD (480×640, ST7701S, GT911 touch). UI framework is LVGL 9.x on ESP-IDF.
 
+## Versioning
+
+**IMPORTANT — remind the user to consider bumping the version whenever code changes are made.**
+
+Version is defined in `src/version.h` (manual `APP_VERSION_MAJOR/MINOR/PATCH`). The firmware build overrides `APP_VERSION_STRING` with `git describe --tags` output. To release a new version:
+1. Bump the numbers in `src/version.h`
+2. Commit and tag: `git tag v1.x.x && git push --tags`
+
 ## Build Commands
 
 ```bash
