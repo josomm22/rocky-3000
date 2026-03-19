@@ -129,8 +129,8 @@ static void check_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
     if (!wifi_ok) {
-        ESP_LOGW(TAG, "No WiFi after %d s — skipping update check", WIFI_WAIT_SECS);
-        s_state = OTA_CHECK_NO_UPDATE;
+        ESP_LOGW(TAG, "No WiFi after %d s — will retry when connected", WIFI_WAIT_SECS);
+        s_state = OTA_CHECK_IDLE;
         vTaskDelete(NULL);
         return;
     }
