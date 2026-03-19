@@ -31,6 +31,7 @@
 #include "screen_settings.h"
 #include "wifi_portal.h"
 #include "secrets.h"
+#include "ota_checker.h"
 
 static const char *TAG = "screen_wifi";
 
@@ -91,6 +92,8 @@ static void on_ip_event(void *arg, esp_event_base_t base,
     if (id == IP_EVENT_STA_GOT_IP)
     {
         s_got_ip = true;
+        /* Retry OTA check now that we have connectivity (no-op if already done) */
+        ota_checker_start();
     }
 }
 

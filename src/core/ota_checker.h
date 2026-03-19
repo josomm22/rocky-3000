@@ -43,3 +43,7 @@ int               ota_checker_get_progress(void);
 
 /* Begin the download-and-flash sequence.  Only valid from AVAILABLE. */
 void              ota_checker_apply(void);
+
+/* Force a fresh version check.  No-op while a check or download is in
+ * progress; resets and restarts from any other (terminal) state. */
+void              ota_checker_recheck(void);

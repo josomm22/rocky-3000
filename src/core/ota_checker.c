@@ -129,8 +129,8 @@ static void check_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
     if (!wifi_ok) {
-        ESP_LOGW(TAG, "No WiFi after %d s — skipping update check", WIFI_WAIT_SECS);
-        s_state = OTA_CHECK_NO_UPDATE;
+        ESP_LOGW(TAG, "No WiFi after %d s — will retry when connected", WIFI_WAIT_SECS);
+        s_state = OTA_CHECK_IDLE;
         vTaskDelete(NULL);
         return;
     }
@@ -310,6 +310,17 @@ void ota_checker_start(void)
     if (s_state != OTA_CHECK_IDLE) return;
     s_state = OTA_CHECK_CHECKING;
     xTaskCreate(check_task, "ota_check", 16384, NULL, 3, NULL);
+}
+
+void ota_checker_recheck(void)
+{
+    /* Allow a fresh check from any terminal state; no-op if already running */
+    if (s_state == OTA_CHECK_CHECKING  ||
+        s_state == OTA_CHECK_DOWNLOADING ||
+        s_state == OTA_CHECK_DONE)
+        return;
+    s_state = OTA_CHECK_IDLE;
+    ota_checker_start();
 }
 
 ota_check_state_t ota_checker_get_state(void)   { return s_state; }
