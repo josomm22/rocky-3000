@@ -125,3 +125,27 @@ static jmp_buf     _u_jmp;
             _U_FAIL(__FILE__, __LINE__, _msg); \
         } \
     } while (0)
+
+#define TEST_ASSERT_TRUE(condition) \
+    do { \
+        if (!(condition)) \
+            _U_FAIL(__FILE__, __LINE__, "Expected TRUE Was FALSE"); \
+    } while (0)
+
+#define TEST_ASSERT_FALSE(condition) \
+    do { \
+        if (condition) \
+            _U_FAIL(__FILE__, __LINE__, "Expected FALSE Was TRUE"); \
+    } while (0)
+
+/* TEST_ASSERT_LESS_OR_EQUAL(threshold, actual) — asserts actual <= threshold */
+#define TEST_ASSERT_LESS_OR_EQUAL(threshold, actual) \
+    do { \
+        int _t = (int)(threshold); \
+        int _a = (int)(actual); \
+        if (_a > _t) { \
+            char _msg[128]; \
+            snprintf(_msg, sizeof(_msg), "Expected <= %d Was %d", _t, _a); \
+            _U_FAIL(__FILE__, __LINE__, _msg); \
+        } \
+    } while (0)
