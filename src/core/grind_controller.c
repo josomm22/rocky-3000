@@ -24,6 +24,7 @@
 
 #include "grind_controller.h"
 #include "lvgl.h"
+#include <math.h>
 #include <stdint.h>
 
 /* ── Build-time config ──────────────────────────────────────── */
@@ -102,6 +103,11 @@ static volatile float s_flow_rate_g_s  = 0.0f;  /* g/s, updated each block */
  * to settle; the 16-sample block average already handles noise. */
 #define HX711_EMA_ALPHA  1.0f
 
+/* Reject a block whose trimmed average deviates more than this from the
+ * previous reading — catches motor-start EMI spikes without adding latency.
+ * A 10 g/s grinder at max can add ~2 g per 200 ms block; 10 g is 5× margin. */
+#define SPIKE_REJECT_DELTA_G  10.0f
+
 static void hx711_task(void *arg)
 {
     (void)arg;
@@ -122,29 +128,40 @@ static void hx711_task(void *arg)
             s_tare_requested = false;
         }
 
-        /* Collect HX711_AVG_SAMPLES readings, blocking on each conversion. */
-        float sum = 0.0f;
-        int   n   = 0;
+        /* Collect HX711_AVG_SAMPLES readings, blocking on each conversion.
+         * Track the single highest sample for a trimmed mean (drop max). */
+        float sum   = 0.0f;
+        float max_g = -1e9f;
+        int   n     = 0;
         for (int i = 0; i < HX711_AVG_SAMPLES; i++) {
             while (!hx711_is_ready())
                 vTaskDelay(1);
             if (hx711_read_grams(s_cal_factor, &g)) {
                 sum += g;
+                if (g > max_g) max_g = g;
                 n++;
             }
         }
-        if (n > 0) {
-            float avg = sum / (float)n;
-            s_latest_weight = HX711_EMA_ALPHA * avg
-                              + (1.0f - HX711_EMA_ALPHA) * s_latest_weight;
+        if (n > 1) {
+            /* Layer 1: trimmed mean — drop the single highest sample to
+             * remove within-block outliers caused by EMI bursts. */
+            float avg = (sum - max_g) / (float)(n - 1);
 
-            /* Flow rate: weight delta over the fixed block period.
-             * Block period = HX711_AVG_SAMPLES / HX711_POLL_HZ (seconds). */
-            static float prev_block_weight = 0.0f;
-            float dt_s = (float)HX711_AVG_SAMPLES / (float)HX711_POLL_HZ;
-            float rate = (avg - prev_block_weight) / dt_s;
-            s_flow_rate_g_s = (rate > 0.0f) ? rate : 0.0f;
-            prev_block_weight = avg;
+            /* Layer 2: inter-block delta gate — reject the entire block if
+             * the jump is physically impossible (spike from motor start etc.) */
+            if (fabsf(avg - s_latest_weight) < SPIKE_REJECT_DELTA_G) {
+                s_latest_weight = HX711_EMA_ALPHA * avg
+                                  + (1.0f - HX711_EMA_ALPHA) * s_latest_weight;
+
+                /* Flow rate: weight delta over the fixed block period.
+                 * Block period = HX711_AVG_SAMPLES / HX711_POLL_HZ (seconds). */
+                static float prev_block_weight = 0.0f;
+                float dt_s = (float)HX711_AVG_SAMPLES / (float)HX711_POLL_HZ;
+                float rate = (avg - prev_block_weight) / dt_s;
+                s_flow_rate_g_s = (rate > 0.0f) ? rate : 0.0f;
+                prev_block_weight = avg;
+            }
+            /* else: spike detected — keep previous weight and flow rate */
         }
     }
 }
