@@ -15,6 +15,7 @@
 #include "screen_settings.h"
 #include "screen_wifi.h"
 #include "web_server.h"
+#include "ota_checker.h"
 
 /* ── UI handles ──────────────────────────────────────────────── */
 static lv_obj_t  *s_lbl_status   = NULL;
@@ -203,6 +204,7 @@ static void render_connected(lv_obj_t *scr, const char *ip)
 void screen_ota_load(void)
 {
     web_server_reset_ota_state();
+    ota_checker_recheck(); /* kick off / retry auto cloud check */
 
     lv_obj_t *scr = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr, COL_BG, LV_PART_MAIN | LV_STATE_DEFAULT);

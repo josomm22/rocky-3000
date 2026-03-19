@@ -312,6 +312,17 @@ void ota_checker_start(void)
     xTaskCreate(check_task, "ota_check", 16384, NULL, 3, NULL);
 }
 
+void ota_checker_recheck(void)
+{
+    /* Allow a fresh check from any terminal state; no-op if already running */
+    if (s_state == OTA_CHECK_CHECKING  ||
+        s_state == OTA_CHECK_DOWNLOADING ||
+        s_state == OTA_CHECK_DONE)
+        return;
+    s_state = OTA_CHECK_IDLE;
+    ota_checker_start();
+}
+
 ota_check_state_t ota_checker_get_state(void)   { return s_state; }
 const char       *ota_checker_get_version(void)  { return s_new_version; }
 int               ota_checker_get_progress(void) { return s_progress; }
