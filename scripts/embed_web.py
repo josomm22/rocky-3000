@@ -36,9 +36,7 @@ def main():
     ratio   = 100 * (1 - len(compressed) / len(raw))
     print(f'web bundle: {raw_kb:.1f} KB → {comp_kb:.1f} KB gzipped ({ratio:.0f}% reduction)')
 
-    # Format as C byte array
-    hex_bytes = ', '.join(f'0x{b:02x}' for b in compressed)
-    # Wrap at 80 chars / 12 bytes per line for readability
+    # Format as C byte array, 12 bytes per line for readability
     chunks = [compressed[i:i+12] for i in range(0, len(compressed), 12)]
     lines  = ['    ' + ', '.join(f'0x{b:02x}' for b in chunk) for chunk in chunks]
     hex_block = ',\n'.join(lines)
