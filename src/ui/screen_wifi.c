@@ -92,8 +92,10 @@ static void on_ip_event(void *arg, esp_event_base_t base,
     if (id == IP_EVENT_STA_GOT_IP)
     {
         s_got_ip = true;
-        /* Retry OTA check now that we have connectivity (no-op if already done) */
-        ota_checker_start();
+        /* Retry OTA check now that we have connectivity.
+         * Use recheck so a prior NO_UPDATE/ERROR result is cleared — the
+         * earlier attempt may have failed due to no IP yet. */
+        ota_checker_recheck();
     }
 }
 

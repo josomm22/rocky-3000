@@ -41,7 +41,10 @@ const char       *ota_checker_get_version(void);
 /* Download progress 0–100.  Valid when state == DOWNLOADING. */
 int               ota_checker_get_progress(void);
 
-/* Begin the download-and-flash sequence.  Only valid from AVAILABLE. */
+/* True when the available release has a .bin asset that can be flashed. */
+bool              ota_checker_has_binary(void);
+
+/* Begin the download-and-flash sequence.  Only valid from AVAILABLE + has_binary. */
 void              ota_checker_apply(void);
 
 /* Force a fresh version check.  No-op while a check or download is in
