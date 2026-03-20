@@ -67,8 +67,21 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: web/package.json
+
       - name: Install PlatformIO
         run: pip install platformio
+
+      - name: Build React app
+        run: cd web && npm install && npm run build
+
+      - name: Embed web bundle into C header
+        run: python scripts/embed_web.py
 
       - name: Generate secrets.h
         env:

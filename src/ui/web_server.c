@@ -13,6 +13,7 @@
 #include "esp_log.h"
 #include <stdio.h>
 #include <string.h>
+#include "web_bundle.h"   /* auto-generated: WEB_BUNDLE_GZ, WEB_BUNDLE_GZ_LEN */
 
 static const char *TAG = "web_srv";
 
@@ -349,6 +350,16 @@ static const char s_ota_html[] =
       "x.send(file);}"
     "</script></body></html>";
 
+/* ── React app (/app) ─────────────────────────────────────────── */
+
+static esp_err_t handle_app(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    httpd_resp_send(req, (const char *)WEB_BUNDLE_GZ, (ssize_t)WEB_BUNDLE_GZ_LEN);
+    return ESP_OK;
+}
+
 static esp_err_t handle_ota(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
@@ -435,6 +446,9 @@ void web_server_start(void)
     }
     httpd_handle_t server = s_server;
 
+    static const httpd_uri_t app_uri = {
+        .uri = "/app", .method = HTTP_GET, .handler = handle_app
+    };
     static const httpd_uri_t history_uri = {
         .uri = "/history", .method = HTTP_GET, .handler = handle_history
     };
@@ -451,11 +465,12 @@ void web_server_start(void)
         .uri = "/update", .method = HTTP_POST, .handler = handle_update
     };
 
+    httpd_register_uri_handler(server, &app_uri);
     httpd_register_uri_handler(server, &history_uri);
     httpd_register_uri_handler(server, &history_json_uri);
     httpd_register_uri_handler(server, &sensor_uri);
     httpd_register_uri_handler(server, &ota_uri);
     httpd_register_uri_handler(server, &update_uri);
 
-    ESP_LOGI(TAG, "Web server started — /history  /ota  /update");
+    ESP_LOGI(TAG, "Web server started — /app  /history  /ota  /update");
 }
