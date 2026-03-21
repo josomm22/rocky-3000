@@ -1,4 +1,5 @@
 #pragma once
+#include <stdbool.h>
 
 /*
  * ota_checker — background GitHub release check + cloud OTA
