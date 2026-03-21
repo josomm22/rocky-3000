@@ -16,6 +16,7 @@
 #include "screen_wifi.h"
 #include "web_server.h"
 #include "ota_checker.h"
+#include "version.h"
 
 /* ── UI handles ──────────────────────────────────────────────── */
 static lv_obj_t  *s_lbl_status   = NULL;
@@ -119,11 +120,11 @@ static void render_no_wifi(lv_obj_t *scr)
     lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER,
                                 LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_width(lbl, SCR_W - 60);
-    lv_obj_align(lbl, LV_ALIGN_CENTER, 0, -50);
+    lv_obj_align(lbl, LV_ALIGN_CENTER, 0, -36);
 
     lv_obj_t *btn = lv_button_create(scr);
     lv_obj_set_size(btn, 240, 62);
-    lv_obj_align(btn, LV_ALIGN_CENTER, 0, 60);
+    lv_obj_align(btn, LV_ALIGN_CENTER, 0, 74);
     lv_obj_set_style_radius(btn, 12, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_color(btn, COL_SURFACE, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_color(btn, COL_PRESET_BG, LV_PART_MAIN | LV_STATE_PRESSED);
@@ -151,7 +152,7 @@ static void render_connected(lv_obj_t *scr, const char *ip)
                                LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_color(lbl_hint, COL_TEXT_DIM,
                                 LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_align(lbl_hint, LV_ALIGN_TOP_MID, 0, 100);
+    lv_obj_align(lbl_hint, LV_ALIGN_TOP_MID, 0, 128);
 
     /* Large accent URL */
     char url[32];
@@ -163,12 +164,12 @@ static void render_connected(lv_obj_t *scr, const char *ip)
                                LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_color(lbl_url, COL_ACCENT,
                                 LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_align(lbl_url, LV_ALIGN_TOP_MID, 0, 142);
+    lv_obj_align(lbl_url, LV_ALIGN_TOP_MID, 0, 170);
 
     /* Thin divider */
     lv_obj_t *div = lv_obj_create(scr);
     lv_obj_set_size(div, SCR_W - 60, 1);
-    lv_obj_align(div, LV_ALIGN_TOP_MID, 0, 208);
+    lv_obj_align(div, LV_ALIGN_TOP_MID, 0, 236);
     lv_obj_set_style_bg_color(div, COL_SURFACE, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_opa(div, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_border_width(div, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -181,12 +182,12 @@ static void render_connected(lv_obj_t *scr, const char *ip)
                                LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_color(s_lbl_status, COL_TEXT_DIM,
                                 LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_align(s_lbl_status, LV_ALIGN_TOP_MID, 0, 230);
+    lv_obj_align(s_lbl_status, LV_ALIGN_TOP_MID, 0, 258);
 
     /* Progress bar (hidden until upload starts) */
     s_bar = lv_bar_create(scr);
     lv_obj_set_size(s_bar, SCR_W - 80, 22);
-    lv_obj_align(s_bar, LV_ALIGN_TOP_MID, 0, 278);
+    lv_obj_align(s_bar, LV_ALIGN_TOP_MID, 0, 306);
     lv_bar_set_range(s_bar, 0, 100);
     lv_bar_set_value(s_bar, 0, LV_ANIM_OFF);
     lv_obj_set_style_bg_color(s_bar, COL_SURFACE, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -248,6 +249,15 @@ void screen_ota_load(void)
     lv_obj_set_style_bg_opa(hdiv, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_border_width(hdiv, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_pad_all(hdiv, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    /* ── Current version ────────────────────────────────────── */
+    lv_obj_t *lbl_ver = lv_label_create(scr);
+    lv_label_set_text(lbl_ver, "Current: " APP_VERSION_DISPLAY);
+    lv_obj_set_style_text_font(lbl_ver, &lv_font_montserrat_24,
+                               LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(lbl_ver, COL_TEXT_DIM,
+                                LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_align(lbl_ver, LV_ALIGN_TOP_MID, 0, 82);
 
     /* ── Body ───────────────────────────────────────────────── */
     if (!screen_wifi_is_connected()) {

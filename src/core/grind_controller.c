@@ -38,13 +38,13 @@
 #define DEFAULT_OFFSET_G  0.0f
 #define AUTOTUNE_FACTOR   0.5f
 #define AUTOTUNE_DEADBAND 0.1f   /* ignore deltas smaller than this (g) */
-#define OFFSET_MIN_G     -2.0f
-#define OFFSET_MAX_G      2.0f
+#define OFFSET_MIN_G     -5.0f
+#define OFFSET_MAX_G      5.0f
 
 /* Dynamic coast prediction: stop_at = target - coast_g - s_offset
  *   coast_g = (motor_latency_ms / 1000) × flow_rate_g_s × COAST_RATIO
  * Falls back to COAST_FALLBACK_G when flow rate is not yet available. */
-#define MOTOR_LATENCY_MS_DEFAULT  100.0f
+#define MOTOR_LATENCY_MS_DEFAULT  250.0f   /* coffee grinder motors coast 200-400ms; tune via settings */
 #define COAST_RATIO               1.0f
 #define COAST_FALLBACK_G          0.3f   /* used when flow rate == 0 */
 
@@ -95,9 +95,10 @@ static volatile float s_latest_weight  = 0.0f;
 static volatile float s_flow_rate_g_s  = 0.0f;  /* g/s, updated each block */
 
 /* Block-average this many consecutive HX711 conversions before EMA.
- * 8 samples × 12.5 ms = 100 ms per update — matches the display rate.
+ * 8 samples × 12.5 ms = 100 ms per update — matches the display rate exactly,
+ * so every poll_cb call reads a fresh weight (halves measurement staleness vs 16).
  * Reduces white noise by √8 ≈ 2.8× before EMA runs. */
-#define HX711_AVG_SAMPLES  16
+#define HX711_AVG_SAMPLES  8
 
 /* EMA on top of the block average: α=0.5 → one block period (~200 ms)
  * to settle; the 16-sample block average already handles noise. */
@@ -319,11 +320,13 @@ static void poll_cb(lv_timer_t *t)
     s_weight = (float)s_latest_weight;
 #endif
 
-    /* Dynamic stop threshold: coast_g = latency × flow_rate × ratio.
+    /* Dynamic stop threshold: coast_g = (motor_latency + measurement_latency) × flow × ratio.
+     * Measurement latency ≈ half the block period (avg staleness of s_latest_weight).
      * Falls back to COAST_FALLBACK_G until flow rate is established. */
     float flow    = (float)s_flow_rate_g_s;
+    float meas_latency_ms = (HX711_AVG_SAMPLES * 1000.0f / HX711_POLL_HZ) * 0.5f;
     float coast_g = (flow > 0.01f)
-                    ? (s_motor_latency_ms / 1000.0f) * flow * COAST_RATIO
+                    ? ((s_motor_latency_ms + meas_latency_ms) / 1000.0f) * flow * COAST_RATIO
                     : COAST_FALLBACK_G;
     float stop_at = s_target - coast_g - s_offset;
 

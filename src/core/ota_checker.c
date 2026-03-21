@@ -218,22 +218,19 @@ static void check_task(void *arg)
         return;
     }
 
-    /* Find the .bin asset URL */
+    /* Find the .bin asset URL — optional; we still notify even without one */
     char bin_url[256] = {0};
-    if (!find_bin_url(buf, bin_url, sizeof(bin_url))) {
-        ESP_LOGW(TAG, "No .bin asset found in release %s", tag);
-        free(buf);
-        s_state = OTA_CHECK_NO_UPDATE;
-        vTaskDelete(NULL);
-        return;
+    if (find_bin_url(buf, bin_url, sizeof(bin_url))) {
+        strncpy(s_bin_url, bin_url, sizeof(s_bin_url) - 1);
+        ESP_LOGI(TAG, "Update available: %s  URL: %s", tag, bin_url);
+    } else {
+        s_bin_url[0] = '\0';
+        ESP_LOGW(TAG, "Update available: %s  (no .bin asset — OTA install unavailable)", tag);
     }
 
     free(buf);
 
     strncpy(s_new_version, tag, sizeof(s_new_version) - 1);
-    strncpy(s_bin_url,     bin_url, sizeof(s_bin_url) - 1);
-
-    ESP_LOGI(TAG, "Update available: %s  URL: %s", tag, bin_url);
     s_state = OTA_CHECK_AVAILABLE;
     vTaskDelete(NULL);
 }
@@ -327,8 +324,14 @@ ota_check_state_t ota_checker_get_state(void)   { return s_state; }
 const char       *ota_checker_get_version(void)  { return s_new_version; }
 int               ota_checker_get_progress(void) { return s_progress; }
 
+bool ota_checker_has_binary(void)
+{
+    return s_bin_url[0] != '\0';
+}
+
 void ota_checker_apply(void)
 {
     if (s_state != OTA_CHECK_AVAILABLE) return;
+    if (s_bin_url[0] == '\0') return;   /* no asset attached to this release */
     xTaskCreate(dl_task, "ota_dl", 8192, NULL, 5, NULL);
 }

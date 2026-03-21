@@ -10,7 +10,7 @@
 
 #define APP_VERSION_MAJOR 1
 #define APP_VERSION_MINOR 2
-#define APP_VERSION_PATCH 0
+#define APP_VERSION_PATCH 1
 
 /* Stringify helpers */
 #define _VER_STR(x) #x
@@ -20,5 +20,10 @@
 #define APP_VERSION_STRING \
     "v" _VER_XSTR(APP_VERSION_MAJOR) "." _VER_XSTR(APP_VERSION_MINOR) "." _VER_XSTR(APP_VERSION_PATCH)
 #endif
+
+/* Clean vMAJOR.MINOR.PATCH string — never overridden by the build system.
+ * Use this for user-facing display instead of APP_VERSION_STRING. */
+#define APP_VERSION_DISPLAY \
+    "v" _VER_XSTR(APP_VERSION_MAJOR) "." _VER_XSTR(APP_VERSION_MINOR) "." _VER_XSTR(APP_VERSION_PATCH)
 
 #endif /* APP_VERSION_H */

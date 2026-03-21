@@ -34,3 +34,9 @@ int  grind_history_get(grind_record_t *out, int max);
 
 /* Erase all history from RAM and NVS. */
 void grind_history_clear(void);
+
+/*
+ * Delete specific records by 0-based chronological index (as returned by
+ * grind_history_get).  Remaining records are compacted and re-saved.
+ */
+void grind_history_delete_indices(const int *indices, int count);

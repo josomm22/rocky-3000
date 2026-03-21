@@ -283,9 +283,14 @@ static void update_poll_cb(lv_timer_t *t)
 
     /* Show the "update available" banner once */
     if (state == OTA_CHECK_AVAILABLE && !s_update_banner) {
-        char buf[56];
-        snprintf(buf, sizeof(buf), LV_SYMBOL_UP " Update %s — tap to install",
-                 ota_checker_get_version());
+        char buf[64];
+        if (ota_checker_has_binary()) {
+            snprintf(buf, sizeof(buf), LV_SYMBOL_UP " Update %s — tap to install",
+                     ota_checker_get_version());
+        } else {
+            snprintf(buf, sizeof(buf), LV_SYMBOL_UP " Update %s available",
+                     ota_checker_get_version());
+        }
 
         s_update_banner = lv_button_create(s_scr);
         lv_obj_set_width(s_update_banner, SCR_W - 24);
