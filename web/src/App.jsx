@@ -158,26 +158,25 @@ function StatCard({ label, value, color }) {
 /* ══════════════════════════════════════════════════════════════════
  * History tab
  * ══════════════════════════════════════════════════════════════════ */
-function HistoryTab({ shots }) {
+function HistoryTab({ shots, selected, onToggle }) {
   if (shots.length === 0) {
     return <div style={{ textAlign: 'center', padding: '48px 0', color: C.muted }}>
       No grind history yet.
     </div>
   }
 
-  const rows  = shots.slice(-20).reverse()
-  const total = shots.length
+  const n    = shots.length
+  const rows = shots.slice(-20).reverse().map((s, i) => ({ ...s, origIdx: n - 1 - i, shotNum: n - i }))
 
   return (
     <>
       <ShotChart shots={shots} />
-      {/* overflow-x: auto prevents 4-column table from clipping on narrow phones */}
       <div style={{ background: C.surface, borderRadius: 12, overflowX: 'auto',
                     WebkitOverflowScrolling: 'touch' }}>
         <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 280 }}>
           <thead>
             <tr>
-              {['#', 'Target', 'Dispensed', 'Delta'].map(h => (
+              {['', '#', 'Target', 'Dispensed', 'Delta'].map(h => (
                 <th key={h} style={{ padding: '10px 12px', textAlign: 'left',
                                      fontSize: '.72rem', color: C.muted, fontWeight: 500,
                                      borderBottom: `1px solid ${C.border}`, whiteSpace: 'nowrap' }}>
@@ -187,11 +186,19 @@ function HistoryTab({ shots }) {
             </tr>
           </thead>
           <tbody>
-            {rows.map((s, i) => {
-              const d = s.r - s.t
+            {rows.map((s) => {
+              const d       = s.r - s.t
+              const checked = selected.has(s.origIdx)
               return (
-                <tr key={i}>
-                  <td style={tdStyle}>{total - i}</td>
+                <tr key={s.origIdx}
+                    style={{ background: checked ? '#2a1a1a' : 'transparent',
+                             transition: 'background .1s' }}>
+                  <td style={{ ...tdStyle, width: 36, paddingRight: 4 }}>
+                    <input type="checkbox" checked={checked}
+                           onChange={() => onToggle(s.origIdx)}
+                           style={{ width: 16, height: 16, cursor: 'pointer', accentColor: C.red }} />
+                  </td>
+                  <td style={{ ...tdStyle, color: checked ? C.red : undefined }}>{s.shotNum}</td>
                   <td style={tdStyle}>{fmt1(s.t)}g</td>
                   <td style={tdStyle}>{fmt1(s.r)}g</td>
                   <td style={{ ...tdStyle, color: deltaColor(d), fontWeight: 600 }}>
@@ -404,23 +411,48 @@ function LiveTab() {
 export default function App() {
   injectGlobalCss(globalCss)
 
-  const [tab,     setTab]     = useState('History')
-  const [shots,   setShots]   = useState([])
-  const [loading, setLoading] = useState(true)
+  const [tab,      setTab]      = useState('History')
+  const [shots,    setShots]    = useState([])
+  const [loading,  setLoading]  = useState(true)
+  const [selected, setSelected] = useState(new Set())
 
   const fetchHistory = useCallback(async () => {
+    setSelected(new Set())
     try {
       const r = await fetch('/api/history')
       if (!r.ok) throw new Error()
       const d = await r.json()
       setShots(d.shots || [])
     } catch {
-      // In dev, fall back to mock data so the UI is previewable without a device
       setShots(import.meta.env.DEV ? MOCK_SHOTS : [])
     } finally {
       setLoading(false)
     }
   }, [])
+
+  const toggleSelect = useCallback((origIdx) => {
+    setSelected(prev => {
+      const next = new Set(prev)
+      if (next.has(origIdx)) next.delete(origIdx)
+      else next.add(origIdx)
+      return next
+    })
+  }, [])
+
+  const clearHistory = useCallback(async () => {
+    if (!confirm('Clear all grind history? This cannot be undone.')) return
+    await fetch('/api/history', { method: 'DELETE' })
+    setShots([])
+    setSelected(new Set())
+  }, [])
+
+  const deleteSelected = useCallback(async () => {
+    if (selected.size === 0) return
+    if (!confirm(`Delete ${selected.size} selected reading${selected.size !== 1 ? 's' : ''}?`)) return
+    const body = Array.from(selected).sort((a, b) => a - b).join(',')
+    await fetch('/api/history/delete', { method: 'POST', body })
+    await fetchHistory()
+  }, [selected, fetchHistory])
 
   useEffect(() => { fetchHistory() }, [fetchHistory])
 
@@ -455,7 +487,21 @@ export default function App() {
       </div>
 
       {tab !== 'Live' && (
-        <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'flex-end' }}>
+        <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+          {selected.size > 0 && (
+            <button onClick={deleteSelected}
+              style={{ background: C.red, border: 'none',
+                       color: '#fff', borderRadius: 8, padding: '8px 16px',
+                       fontSize: '.8rem', cursor: 'pointer', minHeight: 36, fontWeight: 600 }}>
+              Delete selected ({selected.size})
+            </button>
+          )}
+          <button onClick={clearHistory}
+            style={{ background: 'transparent', border: `1px solid ${C.red}`,
+                     color: C.red, borderRadius: 8, padding: '8px 16px',
+                     fontSize: '.8rem', cursor: 'pointer', minHeight: 36 }}>
+            Clear All
+          </button>
           <button onClick={fetchHistory}
             style={{ background: 'transparent', border: `1px solid ${C.border}`,
                      color: C.muted, borderRadius: 8, padding: '8px 16px',
@@ -471,7 +517,7 @@ export default function App() {
         </div>
       ) : (
         <>
-          {tab === 'History' && <HistoryTab shots={shots} />}
+          {tab === 'History' && <HistoryTab shots={shots} selected={selected} onToggle={toggleSelect} />}
           {tab === 'Stats'   && <StatsTab   shots={shots} />}
           {tab === 'Live'    && <LiveTab />}
         </>

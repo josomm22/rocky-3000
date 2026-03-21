@@ -6,6 +6,7 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include <string.h>
+#include <stdbool.h>
 
 #define NVS_NS   "grind_hist"
 #define KEY_CNT  "count"
@@ -66,5 +67,27 @@ void grind_history_clear(void)
     s_count = 0;
     s_head  = 0;
     memset(s_buf, 0, sizeof(s_buf));
+    nvs_save();
+}
+
+void grind_history_delete_indices(const int *del, int del_count)
+{
+    grind_record_t tmp[HISTORY_MAX];
+    int start     = (s_head - s_count + HISTORY_MAX * 2) % HISTORY_MAX;
+    int new_count = 0;
+
+    for (int i = 0; i < s_count; i++) {
+        bool skip = false;
+        for (int j = 0; j < del_count; j++) {
+            if (del[j] == i) { skip = true; break; }
+        }
+        if (!skip)
+            tmp[new_count++] = s_buf[(start + i) % HISTORY_MAX];
+    }
+
+    memset(s_buf, 0, sizeof(s_buf));
+    memcpy(s_buf, tmp, new_count * sizeof(grind_record_t));
+    s_count = new_count;
+    s_head  = new_count % HISTORY_MAX;
     nvs_save();
 }

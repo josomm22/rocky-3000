@@ -21,4 +21,9 @@
     "v" _VER_XSTR(APP_VERSION_MAJOR) "." _VER_XSTR(APP_VERSION_MINOR) "." _VER_XSTR(APP_VERSION_PATCH)
 #endif
 
+/* Clean vMAJOR.MINOR.PATCH string — never overridden by the build system.
+ * Use this for user-facing display instead of APP_VERSION_STRING. */
+#define APP_VERSION_DISPLAY \
+    "v" _VER_XSTR(APP_VERSION_MAJOR) "." _VER_XSTR(APP_VERSION_MINOR) "." _VER_XSTR(APP_VERSION_PATCH)
+
 #endif /* APP_VERSION_H */

@@ -10,10 +10,14 @@
 #include "grind_controller.h"
 #include "esp_http_server.h"
 #include "esp_ota_ops.h"
+#include "esp_system.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include <stdio.h>
 #include <string.h>
 #include "web_bundle.h"   /* auto-generated: WEB_BUNDLE_GZ, WEB_BUNDLE_GZ_LEN */
+#include "version.h"
 
 static const char *TAG = "web_srv";
 
@@ -212,6 +216,42 @@ static esp_err_t handle_history(httpd_req_t *req)
     return ESP_OK;
 }
 
+static esp_err_t handle_history_delete_selected(httpd_req_t *req)
+{
+    char body[256] = {0};
+    int len = httpd_req_recv(req, body, sizeof(body) - 1);
+    if (len <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
+        return ESP_FAIL;
+    }
+    body[len] = '\0';
+
+    int indices[HISTORY_MAX];
+    int count = 0;
+    char *p = body;
+    while (*p && count < HISTORY_MAX) {
+        char *end;
+        long idx = strtol(p, &end, 10);
+        if (end == p) break;
+        if (idx >= 0) indices[count++] = (int)idx;
+        p = end;
+        while (*p == ',') p++;
+    }
+
+    grind_history_delete_indices(indices, count);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
+static esp_err_t handle_history_clear(httpd_req_t *req)
+{
+    grind_history_clear();
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
 static esp_err_t handle_history_json(httpd_req_t *req)
 {
     grind_record_t recs[HISTORY_MAX];
@@ -286,7 +326,8 @@ static const char s_ota_html[] =
     "</style></head><body>"
     "<div class='card'>"
     "<h1>&#9881; Firmware Update</h1>"
-    "<p class='sub'>Drop a <strong>.bin</strong> file below or click to browse, then tap Upload.</p>"
+    "<p class='sub'>Current: <strong>" APP_VERSION_DISPLAY "</strong><br>"
+    "Drop a <strong>.bin</strong> file below or click to browse, then tap Upload.</p>"
     "<div class='drop' id='dz' onclick='document.getElementById(\"f\").click()'>"
       "<div class='drop-icon'>&#128190;</div>"
       "<div id='fi'></div>"
@@ -367,6 +408,13 @@ static esp_err_t handle_ota(httpd_req_t *req)
     return ESP_OK;
 }
 
+static void reboot_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(500));
+    esp_restart();
+}
+
 static esp_err_t handle_update(httpd_req_t *req)
 {
     int total = req->content_len;
@@ -423,6 +471,10 @@ static esp_err_t handle_update(httpd_req_t *req)
 
     httpd_resp_sendstr(req, "OK");
     web_server_ota_done = true;
+
+    /* Reboot after a short delay so the HTTP response has time to flush. */
+    xTaskCreate(reboot_task, "ota_rst", 2048, NULL, 5, NULL);
+
     return ESP_OK;
 }
 
@@ -455,6 +507,12 @@ void web_server_start(void)
     static const httpd_uri_t history_json_uri = {
         .uri = "/api/history", .method = HTTP_GET, .handler = handle_history_json
     };
+    static const httpd_uri_t history_clear_uri = {
+        .uri = "/api/history", .method = HTTP_DELETE, .handler = handle_history_clear
+    };
+    static const httpd_uri_t history_delete_selected_uri = {
+        .uri = "/api/history/delete", .method = HTTP_POST, .handler = handle_history_delete_selected
+    };
     static const httpd_uri_t sensor_uri = {
         .uri = "/api/sensor", .method = HTTP_GET, .handler = handle_sensor
     };
@@ -468,6 +526,8 @@ void web_server_start(void)
     httpd_register_uri_handler(server, &app_uri);
     httpd_register_uri_handler(server, &history_uri);
     httpd_register_uri_handler(server, &history_json_uri);
+    httpd_register_uri_handler(server, &history_clear_uri);
+    httpd_register_uri_handler(server, &history_delete_selected_uri);
     httpd_register_uri_handler(server, &sensor_uri);
     httpd_register_uri_handler(server, &ota_uri);
     httpd_register_uri_handler(server, &update_uri);
