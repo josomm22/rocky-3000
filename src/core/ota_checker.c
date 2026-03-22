@@ -2,12 +2,14 @@
  * ota_checker — background GitHub release check + cloud OTA
  *
  * Flow:
- *   1. check_task: waits for WiFi, hits the GitHub Releases API, parses
- *      tag_name and the .bin browser_download_url, sets state to
- *      AVAILABLE, NO_UPDATE, or ERROR.  A periodic_task re-checks every
- *      4 hours so long-running devices pick up new releases.
+ *   1. check_task: waits for WiFi, syncs NTP, then does a HEAD request to
+ *      https://github.com/{repo}/releases/latest with redirects disabled.
+ *      GitHub responds with 301 and a Location header pointing to
+ *      .../releases/tag/vX.Y.Z — the tag is parsed from that URL and
+ *      compared with the running firmware.  No JSON, no API token needed.
  *   2. dl_task (started by ota_checker_apply): streams the binary into
  *      the next OTA partition via esp_https_ota, then reboots.
+ *   A periodic_task re-checks every 4 hours.
  */
 
 #include "ota_checker.h"
@@ -18,7 +20,10 @@
 #include "esp_http_client.h"
 #include "esp_https_ota.h"
 #include "esp_crt_bundle.h"
+#include "esp_tls.h"
 #include "esp_netif.h"
+#include "esp_sntp.h"
+#include "lwip/dns.h"
 #include "esp_log.h"
 #include "esp_system.h"
 
@@ -28,17 +33,20 @@
 
 static const char *TAG = "ota_checker";
 
-#define API_URL             "https://api.github.com/repos/josomm22/rocky-3000/releases/latest"
-#define API_BUF_SIZE        16384   /* 16 KB — enough for a typical release JSON */
-#define WIFI_WAIT_SECS      60
-#define RECHECK_INTERVAL_S  (4 * 60 * 60)   /* re-check every 4 hours */
+#define RELEASES_URL       "https://github.com/josomm22/rocky-3000/releases/latest"
+#define BIN_URL_FMT        "https://github.com/josomm22/rocky-3000/releases/download/%s/gbwui-%s.bin"
+#define WIFI_WAIT_SECS     60
+#define RECHECK_INTERVAL_S (4 * 60 * 60)   /* re-check every 4 hours */
 
 /* ── Shared state (written by tasks, read by LVGL poll timer) ── */
 static volatile ota_check_state_t s_state    = OTA_CHECK_IDLE;
 static volatile int               s_progress = 0;
 static char s_new_version[24] = {0};
 static char s_bin_url[256]    = {0};
-static bool s_periodic_started = false;
+static bool     s_periodic_started = false;
+static int      s_http_status      = 0;    /* last HTTP status code, 0 = no response */
+static esp_err_t s_open_err        = ESP_OK; /* esp_http_client_open error, when status=0 */
+static int      s_tls_err          = 0;    /* mbedTLS error code, 0 = no TLS error */
 
 /* ── Version comparison ───────────────────────────────────────── */
 
@@ -73,48 +81,26 @@ static bool version_newer(const char *remote, const char *current)
     return rpat > cpat;
 }
 
-/* ── Minimal JSON field extraction ───────────────────────────── */
-
-static bool json_str_field(const char *json, const char *key,
-                            char *out, size_t out_len)
-{
-    char search[64];
-    snprintf(search, sizeof(search), "\"%s\": \"", key);
-    const char *p = strstr(json, search);
-    if (!p) return false;
-    p += strlen(search);
-    const char *end = strchr(p, '"');
-    if (!end) return false;
-    size_t len = (size_t)(end - p);
-    if (len >= out_len) len = out_len - 1;
-    memcpy(out, p, len);
-    out[len] = '\0';
-    return true;
-}
-
-/* Scans for the first browser_download_url whose value ends in ".bin". */
-static bool find_bin_url(const char *json, char *out, size_t out_len)
-{
-    const char *KEY = "\"browser_download_url\": \"";
-    const char *q = json;
-    while ((q = strstr(q, KEY)) != NULL) {
-        q += strlen(KEY);
-        const char *end = strchr(q, '"');
-        if (!end) break;
-        size_t len = (size_t)(end - q);
-        if (len > 4 && strncmp(end - 4, ".bin", 4) == 0) {
-            if (len < out_len) {
-                memcpy(out, q, len);
-                out[len] = '\0';
-                return true;
-            }
-        }
-        q = end + 1;
-    }
-    return false;
-}
-
 /* ── Check task ───────────────────────────────────────────────── */
+
+/* Event handler that captures the Location header and any TLS error */
+static esp_err_t check_event_cb(esp_http_client_event_t *evt)
+{
+    if (evt->event_id == HTTP_EVENT_ON_HEADER &&
+        strcasecmp(evt->header_key, "location") == 0) {
+        char *dst = (char *)evt->user_data;
+        strncpy(dst, evt->header_value, 255);
+    } else if (evt->event_id == HTTP_EVENT_ERROR) {
+        int tls_code = 0, tls_flags = 0;
+        esp_tls_get_and_clear_last_error((esp_tls_error_handle_t)evt->data,
+                                         &tls_code, &tls_flags);
+        if (tls_code) {
+            s_tls_err = tls_code;
+            ESP_LOGE(TAG, "TLS error: -0x%04x  flags: 0x%04x", -tls_code, tls_flags);
+        }
+    }
+    return ESP_OK;
+}
 
 static void check_task(void *arg)
 {
@@ -138,102 +124,112 @@ static void check_task(void *arg)
         return;
     }
 
-    ESP_LOGI(TAG, "Checking for firmware updates...");
+    /* Brief settle: IP address obtained doesn't mean routing is ready yet */
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    ESP_LOGI(TAG, "Free heap before HTTPS: %lu bytes", esp_get_free_heap_size());
 
-    char *buf = malloc(API_BUF_SIZE);
-    if (!buf) {
-        ESP_LOGE(TAG, "OOM for API buffer");
-        s_state = OTA_CHECK_ERROR;
-        vTaskDelete(NULL);
-        return;
+    /* Override DNS with Google's servers — DHCP-provided DNS may return
+     * NXDOMAIN for external hosts on restricted/split-horizon networks */
+    ip_addr_t dns0, dns1;
+    IP_ADDR4(&dns0, 8, 8, 8, 8);
+    IP_ADDR4(&dns1, 8, 8, 4, 4);
+    dns_setserver(0, &dns0);
+    dns_setserver(1, &dns1);
+
+    /* Sync system clock — mbedTLS rejects certs when time is at epoch 0 */
+    if (!esp_sntp_enabled()) {
+        esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+        esp_sntp_setservername(0, "pool.ntp.org");
+        esp_sntp_init();
     }
+    for (int i = 0; i < 15; i++) {
+        if (sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED) break;
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+    if (sntp_get_sync_status() != SNTP_SYNC_STATUS_COMPLETED)
+        ESP_LOGW(TAG, "NTP sync timed out — TLS cert check may fail");
+
+    s_http_status = 0;
+    s_open_err    = ESP_OK;
+    s_tls_err     = 0;
+    ESP_LOGI(TAG, "Checking for firmware updates via redirect check...");
+
+    /* GET github.com/releases/latest with redirects disabled.
+     * GitHub returns 301 → .../releases/tag/vX.Y.Z — parse tag from URL.
+     * This avoids the JSON API entirely: no auth token, no large buffer. */
+    char location[256] = {0};
 
     esp_http_client_config_t cfg = {
-        .url               = API_URL,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .timeout_ms        = 15000,
-        .user_agent        = "GBWUI/" APP_VERSION_STRING,
-        .method            = HTTP_METHOD_GET,
+        .url                   = RELEASES_URL,
+        .crt_bundle_attach     = esp_crt_bundle_attach,
+        .timeout_ms            = 20000,
+        .user_agent            = "GBWUI/" APP_VERSION_STRING,
+        .disable_auto_redirect = true,
+        .max_redirection_count = 0,
+        .event_handler         = check_event_cb,
+        .user_data             = location,
     };
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (!client) {
         ESP_LOGE(TAG, "Failed to init HTTP client");
-        free(buf);
         s_state = OTA_CHECK_ERROR;
         vTaskDelete(NULL);
         return;
     }
 
-    esp_http_client_set_header(client, "Accept", "application/vnd.github+json");
-    esp_http_client_set_header(client, "X-GitHub-Api-Version", "2022-11-28");
-
-    esp_err_t err = esp_http_client_open(client, 0);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "HTTP open failed: %s", esp_err_to_name(err));
-        esp_http_client_cleanup(client);
-        free(buf);
-        s_state = OTA_CHECK_ERROR;
-        vTaskDelete(NULL);
-        return;
-    }
-
-    esp_http_client_fetch_headers(client);
-
-    int status = esp_http_client_get_status_code(client);
-    if (status != 200) {
-        ESP_LOGW(TAG, "GitHub API returned HTTP %d — check failed", status);
-        esp_http_client_close(client);
-        esp_http_client_cleanup(client);
-        free(buf);
-        s_state = OTA_CHECK_ERROR;
-        vTaskDelete(NULL);
-        return;
-    }
-
-    int total = 0;
-    while (total < API_BUF_SIZE - 1) {
-        int n = esp_http_client_read(client, buf + total, API_BUF_SIZE - 1 - total);
-        if (n <= 0) break;
-        total += n;
-    }
-    buf[total] = '\0';
-
-    esp_http_client_close(client);
+    esp_err_t err = esp_http_client_perform(client);
+    int status    = esp_http_client_get_status_code(client);
     esp_http_client_cleanup(client);
 
-    /* Parse tag_name */
-    char tag[32] = {0};
-    if (!json_str_field(buf, "tag_name", tag, sizeof(tag))) {
-        ESP_LOGW(TAG, "tag_name not found in response — malformed or truncated JSON");
-        free(buf);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "HTTP perform failed: %s (0x%x)", esp_err_to_name(err), err);
+        s_open_err = err;
+        s_state    = OTA_CHECK_ERROR;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    s_http_status = status;
+    ESP_LOGI(TAG, "HTTP %d  Location: %s", status, location);
+
+    if (status != 301 && status != 302) {
+        ESP_LOGW(TAG, "Unexpected status %d — expected redirect", status);
         s_state = OTA_CHECK_ERROR;
         vTaskDelete(NULL);
         return;
     }
+
+    /* Extract tag from Location: .../releases/tag/vX.Y.Z */
+    const char *tag_prefix = "/tag/";
+    const char *tag_start  = strstr(location, tag_prefix);
+    if (!tag_start) {
+        ESP_LOGW(TAG, "No /tag/ in Location header: %s", location);
+        s_state = OTA_CHECK_ERROR;
+        vTaskDelete(NULL);
+        return;
+    }
+    tag_start += strlen(tag_prefix);
+
+    char tag[32] = {0};
+    strncpy(tag, tag_start, sizeof(tag) - 1);
+    /* Trim any trailing path/query */
+    char *p = tag;
+    while (*p && *p != '/' && *p != '?') p++;
+    *p = '\0';
 
     ESP_LOGI(TAG, "Latest: %s  Running: %s", tag, APP_VERSION_STRING);
 
     if (!version_newer(tag, APP_VERSION_STRING)) {
         ESP_LOGI(TAG, "Firmware is up to date");
-        free(buf);
         s_state = OTA_CHECK_NO_UPDATE;
         vTaskDelete(NULL);
         return;
     }
 
-    /* Find the .bin asset URL — optional; we still notify even without one */
-    char bin_url[256] = {0};
-    if (find_bin_url(buf, bin_url, sizeof(bin_url))) {
-        strncpy(s_bin_url, bin_url, sizeof(s_bin_url) - 1);
-        ESP_LOGI(TAG, "Update available: %s  URL: %s", tag, bin_url);
-    } else {
-        s_bin_url[0] = '\0';
-        ESP_LOGW(TAG, "Update available: %s  (no .bin asset — OTA install unavailable)", tag);
-    }
-
-    free(buf);
-
+    /* Construct download URL from known naming convention (see release.yml) */
+    snprintf(s_bin_url, sizeof(s_bin_url), BIN_URL_FMT, tag, tag);
     strncpy(s_new_version, tag, sizeof(s_new_version) - 1);
+    ESP_LOGI(TAG, "Update available: %s  URL: %s", tag, s_bin_url);
     s_state = OTA_CHECK_AVAILABLE;
     vTaskDelete(NULL);
 }
@@ -327,7 +323,7 @@ void ota_checker_start(void)
 {
     if (s_state != OTA_CHECK_IDLE) return;
     s_state = OTA_CHECK_CHECKING;
-    xTaskCreate(check_task, "ota_check", 16384, NULL, 3, NULL);
+    xTaskCreate(check_task, "ota_check", 24576, NULL, 3, NULL);
     if (!s_periodic_started) {
         s_periodic_started = true;
         xTaskCreate(periodic_task, "ota_periodic", 2048, NULL, 1, NULL);
@@ -347,9 +343,23 @@ void ota_checker_recheck(void)
     ota_checker_start();
 }
 
-ota_check_state_t ota_checker_get_state(void)   { return s_state; }
-const char       *ota_checker_get_version(void)  { return s_new_version; }
-int               ota_checker_get_progress(void) { return s_progress; }
+void ota_checker_force_check(void)
+{
+    /* Only blocks if already in flight or done */
+    if (s_state == OTA_CHECK_CHECKING    ||
+        s_state == OTA_CHECK_DOWNLOADING ||
+        s_state == OTA_CHECK_DONE)
+        return;
+    s_state = OTA_CHECK_IDLE;
+    ota_checker_start();
+}
+
+ota_check_state_t ota_checker_get_state(void)      { return s_state; }
+const char       *ota_checker_get_version(void)    { return s_new_version; }
+int               ota_checker_get_progress(void)   { return s_progress; }
+int               ota_checker_get_http_status(void){ return s_http_status; }
+int               ota_checker_get_open_err(void)   { return (int)s_open_err; }
+int               ota_checker_get_tls_err(void)    { return s_tls_err; }
 
 bool ota_checker_has_binary(void)
 {

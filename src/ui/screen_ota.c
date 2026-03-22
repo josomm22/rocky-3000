@@ -8,6 +8,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include "esp_err.h"
 #include "esp_netif.h"
 #include "lvgl.h"
 #include "ui_palette.h"
@@ -21,6 +22,9 @@
 /* ── UI handles ──────────────────────────────────────────────── */
 static lv_obj_t  *s_lbl_status   = NULL;
 static lv_obj_t  *s_bar          = NULL;
+static lv_obj_t  *s_lbl_cloud    = NULL;   /* cloud check status text  */
+static lv_obj_t  *s_btn_check    = NULL;   /* "Check Now" button       */
+static lv_obj_t  *s_lbl_btn      = NULL;   /* label inside that button */
 static lv_timer_t *s_poll        = NULL;
 static lv_timer_t *s_reboot_timer = NULL;
 
@@ -33,6 +37,67 @@ static void reboot_cb(lv_timer_t *t)
     (void)t;
     extern void esp_restart(void);
     esp_restart();
+}
+
+/* Update cloud-check status label + button from current ota state */
+static void refresh_cloud_ui(void)
+{
+    if (!s_lbl_cloud || !s_btn_check || !s_lbl_btn) return;
+
+    ota_check_state_t cs = ota_checker_get_state();
+    const char *txt  = NULL;
+    lv_color_t  col  = COL_TEXT_DIM;
+    bool        busy = false;
+
+    switch (cs) {
+        case OTA_CHECK_IDLE:
+        case OTA_CHECK_CHECKING:
+            txt  = "Checking GitHub\xe2\x80\xa6";
+            busy = true;
+            break;
+        case OTA_CHECK_NO_UPDATE:
+            txt = "Up to date";
+            break;
+        case OTA_CHECK_AVAILABLE: {
+            static char avail_buf[40];
+            snprintf(avail_buf, sizeof(avail_buf),
+                     "%s available", ota_checker_get_version());
+            txt = avail_buf;
+            col = COL_ACCENT;
+            break;
+        }
+        case OTA_CHECK_DOWNLOADING:
+        case OTA_CHECK_DONE:
+            txt  = "Installing update\xe2\x80\xa6";
+            col  = COL_ACCENT;
+            busy = true;
+            break;
+        case OTA_CHECK_ERROR: {
+            static char err_buf[64];
+            int code = ota_checker_get_http_status();
+            if (code > 0) {
+                snprintf(err_buf, sizeof(err_buf), "HTTP %d", code);
+            } else {
+                esp_err_t e = (esp_err_t)ota_checker_get_open_err();
+                snprintf(err_buf, sizeof(err_buf), "%s", esp_err_to_name(e));
+            }
+            txt = err_buf;
+            col = COL_ERROR;
+            break;
+        }
+    }
+
+    if (txt) {
+        lv_label_set_text(s_lbl_cloud, txt);
+        lv_obj_set_style_text_color(s_lbl_cloud, col,
+                                    LV_PART_MAIN | LV_STATE_DEFAULT);
+    }
+
+    lv_label_set_text(s_lbl_btn, busy ? "Checking\xe2\x80\xa6" : "Check Now");
+    if (busy)
+        lv_obj_add_state(s_btn_check, LV_STATE_DISABLED);
+    else
+        lv_obj_remove_state(s_btn_check, LV_STATE_DISABLED);
 }
 
 static void poll_cb(lv_timer_t *t)
@@ -74,6 +139,15 @@ static void poll_cb(lv_timer_t *t)
             lv_obj_remove_flag(s_bar, LV_OBJ_FLAG_HIDDEN);
         }
     }
+
+    refresh_cloud_ui();
+}
+
+static void check_now_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    ota_checker_force_check();
+    refresh_cloud_ui();
 }
 
 /* ── Screen teardown ────────────────────────────────────────── */
@@ -85,6 +159,9 @@ static void scr_delete_cb(lv_event_t *e)
     if (s_reboot_timer) { lv_timer_delete(s_reboot_timer); s_reboot_timer = NULL; }
     s_lbl_status = NULL;
     s_bar        = NULL;
+    s_lbl_cloud  = NULL;
+    s_btn_check  = NULL;
+    s_lbl_btn    = NULL;
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -196,6 +273,45 @@ static void render_connected(lv_obj_t *scr, const char *ip)
     lv_obj_set_style_radius(s_bar, 11, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_radius(s_bar, 11, LV_PART_INDICATOR | LV_STATE_DEFAULT);
     lv_obj_add_flag(s_bar, LV_OBJ_FLAG_HIDDEN);
+
+    /* ── Cloud update check section ─────────────────────────── */
+    lv_obj_t *cdiv = lv_obj_create(scr);
+    lv_obj_set_size(cdiv, SCR_W - 60, 1);
+    lv_obj_align(cdiv, LV_ALIGN_TOP_MID, 0, 344);
+    lv_obj_set_style_bg_color(cdiv, COL_SURFACE, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(cdiv, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(cdiv, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_all(cdiv, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    s_lbl_cloud = lv_label_create(scr);
+    lv_obj_set_style_text_font(s_lbl_cloud, &lv_font_montserrat_24,
+                               LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_align(s_lbl_cloud, LV_ALIGN_TOP_MID, 0, 358);
+
+    s_btn_check = lv_button_create(scr);
+    lv_obj_set_size(s_btn_check, SCR_W - 80, 52);
+    lv_obj_align(s_btn_check, LV_ALIGN_TOP_MID, 0, 404);
+    lv_obj_set_style_radius(s_btn_check, 12, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(s_btn_check, COL_SURFACE, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(s_btn_check, COL_PRESET_BG, LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_bg_color(s_btn_check, COL_PRESET_BG, LV_PART_MAIN | LV_STATE_DISABLED);
+    lv_obj_set_style_bg_opa(s_btn_check, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_color(s_btn_check, COL_ACCENT, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_color(s_btn_check, COL_TEXT_DIM, LV_PART_MAIN | LV_STATE_DISABLED);
+    lv_obj_set_style_border_width(s_btn_check, 2, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_shadow_width(s_btn_check, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_add_event_cb(s_btn_check, check_now_cb, LV_EVENT_CLICKED, NULL);
+
+    s_lbl_btn = lv_label_create(s_btn_check);
+    lv_obj_set_style_text_font(s_lbl_btn, &lv_font_montserrat_24,
+                               LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(s_lbl_btn, COL_ACCENT,
+                                LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(s_lbl_btn, COL_TEXT_DIM,
+                                LV_PART_MAIN | LV_STATE_DISABLED);
+    lv_obj_center(s_lbl_btn);
+
+    refresh_cloud_ui();   /* set initial text from current check state */
 }
 
 /* ═══════════════════════════════════════════════════════════════
