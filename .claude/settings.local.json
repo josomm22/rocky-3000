@@ -14,19 +14,7 @@
       "Bash(git:*)",
       "Bash(~/.platformio/penv/Scripts/pio run:*)",
       "mcp__github__get_latest_release",
-      "Bash(command -v pio)",
-      "Read(//c/Users/jo/**)",
-      "Bash(cmd.exe /c \"pio run -e waveshare_28b 2>&1\")",
-      "Bash(cmd.exe /c \"C:\\\\Users\\\\jo\\\\.platformio\\\\penv\\\\Scripts\\\\pio.exe run -e waveshare_28b 2>&1\")",
-      "Bash(ls /c/Users/jo/Documents/Coding/grinder/rocky-3000/src/ui/*.h)",
-      "Bash(npm install:*)",
-      "Bash(npm run:*)",
-      "Bash(nvm list:*)",
-      "Bash(where node:*)",
-      "Bash(where npm:*)",
-      "Bash(cmd.exe /c \"C:\\\\Users\\\\jo\\\\.platformio\\\\penv\\\\Scripts\\\\pio.exe run -e waveshare_28b -v 2>&1\")",
-      "Bash(C:/Users/jo/.platformio/penv/Scripts/pio.exe run:*)",
-      "Bash(rm:*)"
+      "WebSearch"
     ]
   }
 }
