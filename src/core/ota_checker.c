@@ -4,7 +4,8 @@
  * Flow:
  *   1. check_task: waits for WiFi, hits the GitHub Releases API, parses
  *      tag_name and the .bin browser_download_url, sets state to
- *      AVAILABLE or NO_UPDATE.
+ *      AVAILABLE, NO_UPDATE, or ERROR.  A periodic_task re-checks every
+ *      4 hours so long-running devices pick up new releases.
  *   2. dl_task (started by ota_checker_apply): streams the binary into
  *      the next OTA partition via esp_https_ota, then reboots.
  */
@@ -27,15 +28,17 @@
 
 static const char *TAG = "ota_checker";
 
-#define API_URL        "https://api.github.com/repos/josomm22/rocky-3000/releases/latest"
-#define API_BUF_SIZE   16384   /* 16 KB — enough for a typical release JSON */
-#define WIFI_WAIT_SECS 60
+#define API_URL             "https://api.github.com/repos/josomm22/rocky-3000/releases/latest"
+#define API_BUF_SIZE        16384   /* 16 KB — enough for a typical release JSON */
+#define WIFI_WAIT_SECS      60
+#define RECHECK_INTERVAL_S  (4 * 60 * 60)   /* re-check every 4 hours */
 
 /* ── Shared state (written by tasks, read by LVGL poll timer) ── */
 static volatile ota_check_state_t s_state    = OTA_CHECK_IDLE;
 static volatile int               s_progress = 0;
 static char s_new_version[24] = {0};
 static char s_bin_url[256]    = {0};
+static bool s_periodic_started = false;
 
 /* ── Version comparison ───────────────────────────────────────── */
 
@@ -178,11 +181,11 @@ static void check_task(void *arg)
 
     int status = esp_http_client_get_status_code(client);
     if (status != 200) {
-        ESP_LOGW(TAG, "GitHub API returned HTTP %d", status);
+        ESP_LOGW(TAG, "GitHub API returned HTTP %d — check failed", status);
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
         free(buf);
-        s_state = OTA_CHECK_NO_UPDATE;
+        s_state = OTA_CHECK_ERROR;
         vTaskDelete(NULL);
         return;
     }
@@ -201,9 +204,9 @@ static void check_task(void *arg)
     /* Parse tag_name */
     char tag[32] = {0};
     if (!json_str_field(buf, "tag_name", tag, sizeof(tag))) {
-        ESP_LOGW(TAG, "tag_name not found in response");
+        ESP_LOGW(TAG, "tag_name not found in response — malformed or truncated JSON");
         free(buf);
-        s_state = OTA_CHECK_NO_UPDATE;
+        s_state = OTA_CHECK_ERROR;
         vTaskDelete(NULL);
         return;
     }
@@ -300,6 +303,24 @@ static void dl_task(void *arg)
     vTaskDelete(NULL);
 }
 
+/* ── Periodic re-check task ───────────────────────────────────── */
+
+static void periodic_task(void *arg)
+{
+    (void)arg;
+    /* Count up in 1-minute increments to avoid pdMS_TO_TICKS overflow */
+    int elapsed_s = 0;
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(60 * 1000));   /* sleep 1 minute */
+        elapsed_s += 60;
+        if (elapsed_s >= RECHECK_INTERVAL_S) {
+            elapsed_s = 0;
+            ESP_LOGI(TAG, "Periodic re-check triggered");
+            ota_checker_recheck();
+        }
+    }
+}
+
 /* ── Public API ───────────────────────────────────────────────── */
 
 void ota_checker_start(void)
@@ -307,12 +328,18 @@ void ota_checker_start(void)
     if (s_state != OTA_CHECK_IDLE) return;
     s_state = OTA_CHECK_CHECKING;
     xTaskCreate(check_task, "ota_check", 16384, NULL, 3, NULL);
+    if (!s_periodic_started) {
+        s_periodic_started = true;
+        xTaskCreate(periodic_task, "ota_periodic", 2048, NULL, 1, NULL);
+    }
 }
 
 void ota_checker_recheck(void)
 {
-    /* Allow a fresh check from any terminal state; no-op if already running */
-    if (s_state == OTA_CHECK_CHECKING  ||
+    /* No-op if already running, if an update is waiting for the user,
+     * or if a download/install is in progress */
+    if (s_state == OTA_CHECK_CHECKING    ||
+        s_state == OTA_CHECK_AVAILABLE   ||
         s_state == OTA_CHECK_DOWNLOADING ||
         s_state == OTA_CHECK_DONE)
         return;
