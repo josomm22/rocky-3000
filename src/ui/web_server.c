@@ -303,13 +303,14 @@ static esp_err_t handle_ota_status(httpd_req_t *req)
     const char *state_str   = (state < 7) ? state_names[state] : "unknown";
     const char *err_str     = open_err ? esp_err_to_name((esp_err_t)open_err) : "ESP_OK";
 
-    char buf[300];
+    char buf[320];
     snprintf(buf, sizeof(buf),
         "{\"state\":\"%s\",\"version\":\"%s\","
         "\"http_status\":%d,\"open_err\":%d,\"open_err_str\":\"%s\","
-        "\"tls_err\":%d}",
+        "\"tls_err\":%d,\"progress\":%d}",
         state_str, version ? version : "",
-        http_status, open_err, err_str, tls_err);
+        http_status, open_err, err_str, tls_err,
+        ota_checker_get_progress());
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, buf);
@@ -319,6 +320,12 @@ static esp_err_t handle_ota_status(httpd_req_t *req)
 static esp_err_t handle_ota_check(httpd_req_t *req)
 {
     ota_checker_force_check();
+    return handle_ota_status(req);
+}
+
+static esp_err_t handle_ota_apply(httpd_req_t *req)
+{
+    ota_checker_apply();
     return handle_ota_status(req);
 }
 
@@ -446,24 +453,40 @@ static const char s_ota_html[] =
         ".catch(function(){"
           "document.getElementById('cst').innerHTML='<span class=\"err\">\u26a0 Network error</span>';"
           "document.getElementById('cbtn').disabled=false;});"
-      "cpoll=setInterval(function(){"
+      "if(!cpoll){cpoll=setInterval(function(){"
         "fetch('/api/ota/status').then(function(r){return r.json();}).then(renderOta).catch(function(){});"
-      "},1000);}"
+      "},1000);}}"
+    "function apply(){"
+      "document.getElementById('cst').innerHTML='<span style=\"color:#9e9eb0\">Starting download\u2026</span>';"
+      "fetch('/api/ota/apply',{method:'POST'})"
+        ".then(function(r){return r.json();})"
+        ".then(renderOta)"
+        ".catch(function(){"
+          "document.getElementById('cst').innerHTML='<span class=\"err\">\u26a0 Network error</span>';});"
+      "if(!cpoll){cpoll=setInterval(function(){"
+        "fetch('/api/ota/status').then(function(r){return r.json();}).then(renderOta).catch(function(){});"
+      "},500);}}"
     "function renderOta(d){"
       "var el=document.getElementById('cst');"
       "if(d.state==='checking'){"
         "el.innerHTML='<span style=\"color:#9e9eb0\">Checking\u2026</span>';return;}"
+      "if(d.state==='downloading'){"
+        "var p=d.progress||0;"
+        "el.innerHTML='<progress value=\"'+p+'\" max=\"100\"></progress>"
+          "<div style=\"color:#9e9eb0;font-size:.8rem;margin-top:6px\">Downloading\u2026 '+p+'%</div>';return;}"
       "clearInterval(cpoll);cpoll=null;"
       "document.getElementById('cbtn').disabled=false;"
       "if(d.state==='available'){"
-        "el.innerHTML='<span class=\"ok\">&#10003; Update available: <strong>'+d.version+'</strong>"
-          " \u2014 upload the .bin above to install</span>';}"
+        "el.innerHTML='<div style=\"margin-bottom:10px\"><span class=\"ok\">&#10003; Update available: <strong>'+d.version+'</strong></span></div>"
+          "<button onclick=\"apply()\" style=\"background:#66bb6a;color:#111118;border:none;"
+          "border-radius:10px;padding:10px 0;font-size:.9rem;font-weight:700;"
+          "cursor:pointer;width:100%\">&#11015; Install on Device</button>';}"
       "else if(d.state==='no_update'){"
         "el.innerHTML='<span class=\"ok\">&#10003; Firmware is up to date</span>';}"
       "else if(d.state==='done'){"
-        "el.innerHTML='<span class=\"ok\">&#10003; OTA installed \u2014 rebooting</span>';}"
+        "el.innerHTML='<span class=\"ok\">&#10003; Update installed \u2014 rebooting\u2026</span>';}"
       "else if(d.state==='error'){"
-        "var msg='Check failed';"
+        "var msg='Failed';"
         "if(d.http_status>0){msg+=' (HTTP '+d.http_status+')';}"
         "else if(d.tls_err){msg+=' (TLS -0x'+(-d.tls_err).toString(16).padStart(4,'0')+')';}"
         "else if(d.open_err_str&&d.open_err_str!=='ESP_OK'){msg+=' ('+d.open_err_str+')';}"
@@ -608,6 +631,9 @@ void web_server_start(void)
     static const httpd_uri_t ota_check_uri = {
         .uri = "/api/ota/check", .method = HTTP_POST, .handler = handle_ota_check
     };
+    static const httpd_uri_t ota_apply_uri = {
+        .uri = "/api/ota/apply", .method = HTTP_POST, .handler = handle_ota_apply
+    };
 
     httpd_register_uri_handler(server, &app_uri);
     httpd_register_uri_handler(server, &history_uri);
@@ -619,6 +645,7 @@ void web_server_start(void)
     httpd_register_uri_handler(server, &update_uri);
     httpd_register_uri_handler(server, &ota_status_uri);
     httpd_register_uri_handler(server, &ota_check_uri);
+    httpd_register_uri_handler(server, &ota_apply_uri);
 
     ESP_LOGI(TAG, "Web server started — /app  /history  /ota  /update");
 }

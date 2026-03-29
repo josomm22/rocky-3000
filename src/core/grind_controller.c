@@ -300,6 +300,14 @@ static void pulse_done_cb(lv_timer_t *t)
     ssr_set(0);
     s_pulse_attempts++;
     s_settle_ticks = 0; /* count-up; will wait for is_settled() or timeout */
+#if !GRIND_DEMO_MODE
+    /* Invalidate the settle buffer so is_settled() must wait for a full
+     * fresh window of post-pulse readings before it can fire again.
+     * Without this, stale in-pulse data causes the next pulse to start
+     * before the weight has had time to stabilise. */
+    s_settle_buf_full = false;
+    s_settle_buf_idx = 0;
+#endif
     s_state = GRIND_SETTLING;
 }
 
