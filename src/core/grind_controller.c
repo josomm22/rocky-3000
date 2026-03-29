@@ -230,8 +230,9 @@ static lv_timer_t *s_timer = NULL;
 /* Settle tick counter (counts up after SSR cutoff).
  * Real mode: advance until is_settled() or SETTLE_TIMEOUT_TICKS.
  * Demo mode: use SETTLE_FIXED_TICKS as a simple fixed delay. */
-#define SETTLE_TIMEOUT_TICKS 15 /* 15 × 100 ms = 1.5 s max wait (real) */
-#define SETTLE_FIXED_TICKS 2    /* 2 × 100 ms = 200 ms fixed (demo)    */
+#define SETTLE_TIMEOUT_TICKS 15    /* 15 × 100 ms = 1.5 s max wait (real)              */
+#define SETTLE_FIXED_TICKS 2       /* 2 × 100 ms = 200 ms fixed (demo)                 */
+#define PULSE_SETTLE_MIN_TICKS 12  /* 12 × 100 ms = 1.2 s minimum post-pulse settle    */
 static int s_settle_ticks = 0;
 
 /* Flow rate captured at the main-stop instant (real mode).
@@ -300,6 +301,14 @@ static void pulse_done_cb(lv_timer_t *t)
     ssr_set(0);
     s_pulse_attempts++;
     s_settle_ticks = 0; /* count-up; will wait for is_settled() or timeout */
+#if !GRIND_DEMO_MODE
+    /* Invalidate the settle buffer so is_settled() must wait for a full
+     * fresh window of post-pulse readings before it can fire again.
+     * Without this, stale in-pulse data causes the next pulse to start
+     * before the weight has had time to stabilise. */
+    s_settle_buf_full = false;
+    s_settle_buf_idx = 0;
+#endif
     s_state = GRIND_SETTLING;
 }
 
@@ -353,9 +362,12 @@ static void poll_cb(lv_timer_t *t)
 #else
         s_weight = (float)s_latest_weight;
         s_settle_ticks++;
-        /* Wait at least 2 ticks (200 ms) for fresh settle-buffer data, then
-         * declare settled when std-dev is low or the timeout is reached. */
-        if (s_settle_ticks >= 2 &&
+        /* After a correction pulse, wait longer before re-evaluating — the
+         * grinder coasts for ~250 ms and the scale needs time to stabilise.
+         * After the main stop, 2 ticks (200 ms) is enough to prime the
+         * settle buffer; the std-dev gate does the rest. */
+        int min_ticks = (s_pulse_attempts > 0) ? PULSE_SETTLE_MIN_TICKS : 2;
+        if (s_settle_ticks >= min_ticks &&
             (is_settled() || s_settle_ticks >= SETTLE_TIMEOUT_TICKS))
             settle_complete();
 #endif

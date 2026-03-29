@@ -18,7 +18,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_http_client.h"
-#include "esp_https_ota.h"
+#include "esp_ota_ops.h"
 #include "esp_crt_bundle.h"
 #include "esp_tls.h"
 #include "esp_netif.h"
@@ -236,59 +236,138 @@ static void check_task(void *arg)
 
 /* ── Download + flash task ────────────────────────────────────── */
 
+/* esp_https_ota uses open+fetch_headers and cannot re-establish TLS for
+ * HTTPS→HTTPS redirects (github.com → objects.githubusercontent.com).
+ * We follow the redirect chain manually with esp_http_client, then stream
+ * the firmware directly into the OTA partition with esp_ota_write. */
+
+#define DL_URL_MAX  1024
+#define DL_BUF_SIZE 4096
+
+static char  s_dl_url[DL_URL_MAX];
+static char  s_dl_buf[DL_BUF_SIZE];
+
+static esp_err_t dl_redir_cb(esp_http_client_event_t *evt)
+{
+    if (evt->event_id == HTTP_EVENT_ON_HEADER &&
+        strcasecmp(evt->header_key, "location") == 0) {
+        strncpy((char *)evt->user_data, evt->header_value, DL_URL_MAX - 1);
+    }
+    return ESP_OK;
+}
+
 static void dl_task(void *arg)
 {
     (void)arg;
-    s_state    = OTA_CHECK_DOWNLOADING;
-    s_progress = 0;
+    s_state       = OTA_CHECK_DOWNLOADING;
+    s_progress    = 0;
+    s_http_status = 0;
+    s_open_err    = ESP_OK;
 
-    ESP_LOGI(TAG, "Starting OTA download from %s", s_bin_url);
+    /* Follow redirect chain until we reach a 200 response */
+    strncpy(s_dl_url, s_bin_url, DL_URL_MAX - 1);
+    esp_http_client_handle_t client = NULL;
+    int status = 0, content_len = 0;
 
-    esp_http_client_config_t http_cfg = {
-        .url                  = s_bin_url,
-        .crt_bundle_attach    = esp_crt_bundle_attach,
-        .timeout_ms           = 60000,
-        .keep_alive_enable    = true,
-        .buffer_size          = 4096,
-        .max_redirection_count = 5,
-    };
-    esp_https_ota_config_t ota_cfg = {
-        .http_config = &http_cfg,
-    };
+    for (int hop = 0; hop <= 5; hop++) {
+        char next_loc[DL_URL_MAX] = {0};
+        if (client) { esp_http_client_cleanup(client); client = NULL; }
 
-    esp_https_ota_handle_t ota_handle = NULL;
-    esp_err_t err = esp_https_ota_begin(&ota_cfg, &ota_handle);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "OTA begin failed: %s", esp_err_to_name(err));
-        s_state = OTA_CHECK_ERROR;
-        vTaskDelete(NULL);
-        return;
-    }
-
-    while (1) {
-        err = esp_https_ota_perform(ota_handle);
-        if (err != ESP_ERR_HTTPS_OTA_IN_PROGRESS) break;
-        int total = esp_https_ota_get_image_size(ota_handle);
-        int read  = esp_https_ota_get_image_len_read(ota_handle);
-        if (total > 0) {
-            s_progress = read * 100 / total;
+        esp_http_client_config_t cfg = {
+            .url                   = s_dl_url,
+            .crt_bundle_attach     = esp_crt_bundle_attach,
+            .timeout_ms            = 30000,
+            .buffer_size           = 4096,
+            .disable_auto_redirect = true,
+            .max_redirection_count = 0,
+            .event_handler         = dl_redir_cb,
+            .user_data             = next_loc,
+        };
+        client = esp_http_client_init(&cfg);
+        if (!client) {
+            ESP_LOGE(TAG, "OTA: client init failed");
+            s_state = OTA_CHECK_ERROR; vTaskDelete(NULL); return;
         }
+
+        esp_err_t err = esp_http_client_open(client, 0);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "OTA: open failed: %s", esp_err_to_name(err));
+            s_open_err = err;
+            esp_http_client_cleanup(client);
+            s_state = OTA_CHECK_ERROR; vTaskDelete(NULL); return;
+        }
+
+        content_len = esp_http_client_fetch_headers(client);
+        status      = esp_http_client_get_status_code(client);
+        ESP_LOGI(TAG, "OTA hop %d: HTTP %d", hop, status);
+
+        if (status == 200) break;
+
+        if ((status == 301 || status == 302 || status == 307 || status == 308)
+                && next_loc[0]) {
+            strncpy(s_dl_url, next_loc, DL_URL_MAX - 1);
+            continue;
+        }
+
+        ESP_LOGE(TAG, "OTA: unexpected HTTP %d", status);
+        s_http_status = status;
+        esp_http_client_cleanup(client);
+        s_state = OTA_CHECK_ERROR; vTaskDelete(NULL); return;
     }
 
-    if (!esp_https_ota_is_complete_data_received(ota_handle)) {
-        ESP_LOGE(TAG, "OTA: incomplete data received");
-        esp_https_ota_abort(ota_handle);
-        s_state = OTA_CHECK_ERROR;
-        vTaskDelete(NULL);
-        return;
+    if (status != 200) {
+        s_http_status = status;
+        if (client) esp_http_client_cleanup(client);
+        s_state = OTA_CHECK_ERROR; vTaskDelete(NULL); return;
     }
 
-    esp_err_t finish_err = esp_https_ota_finish(ota_handle);
-    if (finish_err != ESP_OK) {
-        ESP_LOGE(TAG, "OTA finish failed: %s", esp_err_to_name(finish_err));
-        s_state = OTA_CHECK_ERROR;
-        vTaskDelete(NULL);
-        return;
+    /* Stream firmware into the next OTA partition */
+    const esp_partition_t *part = esp_ota_get_next_update_partition(NULL);
+    if (!part) {
+        ESP_LOGE(TAG, "OTA: no update partition");
+        esp_http_client_cleanup(client);
+        s_state = OTA_CHECK_ERROR; vTaskDelete(NULL); return;
+    }
+
+    esp_ota_handle_t ota_handle;
+    if (esp_ota_begin(part, OTA_WITH_SEQUENTIAL_WRITES, &ota_handle) != ESP_OK) {
+        ESP_LOGE(TAG, "OTA: begin failed");
+        esp_http_client_cleanup(client);
+        s_state = OTA_CHECK_ERROR; vTaskDelete(NULL); return;
+    }
+
+    int read_total = 0;
+    while (1) {
+        int n = esp_http_client_read(client, s_dl_buf, DL_BUF_SIZE);
+        if (n < 0) {
+            ESP_LOGE(TAG, "OTA: read error %d", n);
+            esp_ota_abort(ota_handle);
+            esp_http_client_cleanup(client);
+            s_state = OTA_CHECK_ERROR; vTaskDelete(NULL); return;
+        }
+        if (n == 0) break;
+
+        if (esp_ota_write(ota_handle, s_dl_buf, n) != ESP_OK) {
+            ESP_LOGE(TAG, "OTA: flash write failed");
+            esp_ota_abort(ota_handle);
+            esp_http_client_cleanup(client);
+            s_state = OTA_CHECK_ERROR; vTaskDelete(NULL); return;
+        }
+
+        read_total += n;
+        if (content_len > 0)
+            s_progress = read_total * 100 / content_len;
+    }
+
+    esp_http_client_cleanup(client);
+
+    if (esp_ota_end(ota_handle) != ESP_OK) {
+        ESP_LOGE(TAG, "OTA: end failed (corrupt image?)");
+        s_state = OTA_CHECK_ERROR; vTaskDelete(NULL); return;
+    }
+    if (esp_ota_set_boot_partition(part) != ESP_OK) {
+        ESP_LOGE(TAG, "OTA: set boot partition failed");
+        s_state = OTA_CHECK_ERROR; vTaskDelete(NULL); return;
     }
 
     ESP_LOGI(TAG, "OTA complete — rebooting in 2 s");
@@ -370,5 +449,5 @@ void ota_checker_apply(void)
 {
     if (s_state != OTA_CHECK_AVAILABLE) return;
     if (s_bin_url[0] == '\0') return;   /* no asset attached to this release */
-    xTaskCreate(dl_task, "ota_dl", 8192, NULL, 5, NULL);
+    xTaskCreate(dl_task, "ota_dl", 16384, NULL, 5, NULL);
 }
