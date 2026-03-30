@@ -236,22 +236,32 @@ static void check_task(void *arg)
 
 /* ── Download + flash task ────────────────────────────────────── */
 
-/* esp_https_ota uses open+fetch_headers and cannot re-establish TLS for
- * HTTPS→HTTPS redirects (github.com → objects.githubusercontent.com).
- * We follow the redirect chain manually with esp_http_client, then stream
- * the firmware directly into the OTA partition with esp_ota_write. */
+/* esp_http_client_perform (unlike the open/fetch_headers/read streaming path)
+ * correctly reinitialises TLS when following an HTTPS->HTTPS redirect to a
+ * different host (github.com -> objects.githubusercontent.com) in ESP-IDF 5.1+.
+ * Firmware chunks arrive via HTTP_EVENT_ON_DATA and are written directly to
+ * the OTA partition — the same pattern as the working web-upload endpoint. */
 
-#define DL_URL_MAX  1024
-#define DL_BUF_SIZE 4096
+typedef struct {
+    esp_ota_handle_t handle;
+    int              content_len;
+    int              total_read;
+    esp_err_t        write_err;
+} dl_ctx_t;
 
-static char  s_dl_url[DL_URL_MAX];
-static char  s_dl_buf[DL_BUF_SIZE];
-
-static esp_err_t dl_redir_cb(esp_http_client_event_t *evt)
+static esp_err_t dl_event_cb(esp_http_client_event_t *evt)
 {
+    dl_ctx_t *ctx = (dl_ctx_t *)evt->user_data;
+
     if (evt->event_id == HTTP_EVENT_ON_HEADER &&
-        strcasecmp(evt->header_key, "location") == 0) {
-        strncpy((char *)evt->user_data, evt->header_value, DL_URL_MAX - 1);
+        strcasecmp(evt->header_key, "content-length") == 0) {
+        ctx->content_len = atoi(evt->header_value);
+    } else if (evt->event_id == HTTP_EVENT_ON_DATA && evt->data_len > 0) {
+        if (ctx->write_err == ESP_OK)
+            ctx->write_err = esp_ota_write(ctx->handle, evt->data, evt->data_len);
+        ctx->total_read += evt->data_len;
+        if (ctx->content_len > 0)
+            s_progress = ctx->total_read * 100 / ctx->content_len;
     }
     return ESP_OK;
 }
@@ -264,104 +274,59 @@ static void dl_task(void *arg)
     s_http_status = 0;
     s_open_err    = ESP_OK;
 
-    /* Follow redirect chain until we reach a 200 response */
-    strncpy(s_dl_url, s_bin_url, DL_URL_MAX - 1);
-    esp_http_client_handle_t client = NULL;
-    int status = 0, content_len = 0;
-
-    for (int hop = 0; hop <= 5; hop++) {
-        char next_loc[DL_URL_MAX] = {0};
-        if (client) { esp_http_client_cleanup(client); client = NULL; }
-
-        esp_http_client_config_t cfg = {
-            .url                   = s_dl_url,
-            .crt_bundle_attach     = esp_crt_bundle_attach,
-            .timeout_ms            = 30000,
-            .buffer_size           = 4096,
-            .disable_auto_redirect = true,
-            .max_redirection_count = 0,
-            .event_handler         = dl_redir_cb,
-            .user_data             = next_loc,
-        };
-        client = esp_http_client_init(&cfg);
-        if (!client) {
-            ESP_LOGE(TAG, "OTA: client init failed");
-            s_state = OTA_CHECK_ERROR; vTaskDelete(NULL); return;
-        }
-
-        esp_err_t err = esp_http_client_open(client, 0);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "OTA: open failed: %s", esp_err_to_name(err));
-            s_open_err = err;
-            esp_http_client_cleanup(client);
-            s_state = OTA_CHECK_ERROR; vTaskDelete(NULL); return;
-        }
-
-        content_len = esp_http_client_fetch_headers(client);
-        status      = esp_http_client_get_status_code(client);
-        ESP_LOGI(TAG, "OTA hop %d: HTTP %d", hop, status);
-
-        if (status == 200) break;
-
-        if ((status == 301 || status == 302 || status == 307 || status == 308)
-                && next_loc[0]) {
-            strncpy(s_dl_url, next_loc, DL_URL_MAX - 1);
-            continue;
-        }
-
-        ESP_LOGE(TAG, "OTA: unexpected HTTP %d", status);
-        s_http_status = status;
-        esp_http_client_cleanup(client);
-        s_state = OTA_CHECK_ERROR; vTaskDelete(NULL); return;
-    }
-
-    if (status != 200) {
-        s_http_status = status;
-        if (client) esp_http_client_cleanup(client);
-        s_state = OTA_CHECK_ERROR; vTaskDelete(NULL); return;
-    }
-
-    /* Stream firmware into the next OTA partition */
     const esp_partition_t *part = esp_ota_get_next_update_partition(NULL);
     if (!part) {
         ESP_LOGE(TAG, "OTA: no update partition");
-        esp_http_client_cleanup(client);
         s_state = OTA_CHECK_ERROR; vTaskDelete(NULL); return;
     }
 
-    esp_ota_handle_t ota_handle;
-    if (esp_ota_begin(part, OTA_WITH_SEQUENTIAL_WRITES, &ota_handle) != ESP_OK) {
+    dl_ctx_t ctx = { .write_err = ESP_OK };
+    if (esp_ota_begin(part, OTA_WITH_SEQUENTIAL_WRITES, &ctx.handle) != ESP_OK) {
         ESP_LOGE(TAG, "OTA: begin failed");
-        esp_http_client_cleanup(client);
         s_state = OTA_CHECK_ERROR; vTaskDelete(NULL); return;
     }
 
-    int read_total = 0;
-    while (1) {
-        int n = esp_http_client_read(client, s_dl_buf, DL_BUF_SIZE);
-        if (n < 0) {
-            ESP_LOGE(TAG, "OTA: read error %d", n);
-            esp_ota_abort(ota_handle);
-            esp_http_client_cleanup(client);
-            s_state = OTA_CHECK_ERROR; vTaskDelete(NULL); return;
-        }
-        if (n == 0) break;
+    ESP_LOGI(TAG, "OTA: downloading %s", s_bin_url);
 
-        if (esp_ota_write(ota_handle, s_dl_buf, n) != ESP_OK) {
-            ESP_LOGE(TAG, "OTA: flash write failed");
-            esp_ota_abort(ota_handle);
-            esp_http_client_cleanup(client);
-            s_state = OTA_CHECK_ERROR; vTaskDelete(NULL); return;
-        }
-
-        read_total += n;
-        if (content_len > 0)
-            s_progress = read_total * 100 / content_len;
+    esp_http_client_config_t cfg = {
+        .url                   = s_bin_url,
+        .crt_bundle_attach     = esp_crt_bundle_attach,
+        .timeout_ms            = 60000,
+        .buffer_size           = 4096,
+        .max_redirection_count = 5,
+        .event_handler         = dl_event_cb,
+        .user_data             = &ctx,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) {
+        ESP_LOGE(TAG, "OTA: client init failed");
+        esp_ota_abort(ctx.handle);
+        s_state = OTA_CHECK_ERROR; vTaskDelete(NULL); return;
     }
 
+    esp_err_t err = esp_http_client_perform(client);
+    int status    = esp_http_client_get_status_code(client);
     esp_http_client_cleanup(client);
 
-    if (esp_ota_end(ota_handle) != ESP_OK) {
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "OTA: perform failed: %s", esp_err_to_name(err));
+        s_open_err = err;
+        esp_ota_abort(ctx.handle);
+        s_state = OTA_CHECK_ERROR; vTaskDelete(NULL); return;
+    }
+    if (status != 200) {
+        ESP_LOGE(TAG, "OTA: unexpected HTTP %d", status);
+        s_http_status = status;
+        esp_ota_abort(ctx.handle);
+        s_state = OTA_CHECK_ERROR; vTaskDelete(NULL); return;
+    }
+    if (ctx.write_err != ESP_OK) {
+        ESP_LOGE(TAG, "OTA: flash write failed");
+        esp_ota_abort(ctx.handle);
+        s_state = OTA_CHECK_ERROR; vTaskDelete(NULL); return;
+    }
+
+    if (esp_ota_end(ctx.handle) != ESP_OK) {
         ESP_LOGE(TAG, "OTA: end failed (corrupt image?)");
         s_state = OTA_CHECK_ERROR; vTaskDelete(NULL); return;
     }
