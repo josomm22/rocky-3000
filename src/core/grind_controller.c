@@ -361,6 +361,7 @@ static void poll_cb(lv_timer_t *t)
             settle_complete();
 #else
         s_weight = (float)s_latest_weight;
+        if (s_weight < 0.0f) s_weight = 0.0f;
         s_settle_ticks++;
         /* After a correction pulse, wait longer before re-evaluating — the
          * grinder coasts for ~250 ms and the scale needs time to stabilise.
@@ -384,6 +385,7 @@ static void poll_cb(lv_timer_t *t)
             s_weight = 0.0f;
 #else
         s_weight = (float)s_latest_weight;
+        if (s_weight < 0.0f) s_weight = 0.0f;
 #endif
         return;
     }
@@ -401,6 +403,11 @@ static void poll_cb(lv_timer_t *t)
     s_flow_rate_g_s = DEMO_RAMP_G_PER_SEC;
 #else
     s_weight = (float)s_latest_weight;
+    /* Motor startup vibration / SSR-switching EMI can drive the HX711 briefly
+     * negative right after the SSR fires.  Coffee weight is physically >= 0 g;
+     * clamping here prevents the grinder from running extra to "pay off" a
+     * phantom negative-gram debt before reaching the stop threshold. */
+    if (s_weight < 0.0f) s_weight = 0.0f;
 #endif
 
     /* Dynamic stop threshold: coast_g = (motor_latency + measurement_latency) × flow × ratio.
