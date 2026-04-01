@@ -24,6 +24,7 @@
 #include "esp_netif.h"
 #include "esp_sntp.h"
 #include "lwip/dns.h"
+#include "esp_https_ota.h"
 #include "esp_log.h"
 #include "esp_system.h"
 
@@ -236,32 +237,24 @@ static void check_task(void *arg)
 
 /* ── Download + flash task ────────────────────────────────────── */
 
-/* esp_http_client_perform (unlike the open/fetch_headers/read streaming path)
- * correctly reinitialises TLS when following an HTTPS->HTTPS redirect to a
- * different host (github.com -> objects.githubusercontent.com) in ESP-IDF 5.1+.
- * Firmware chunks arrive via HTTP_EVENT_ON_DATA and are written directly to
- * the OTA partition — the same pattern as the working web-upload endpoint. */
+/*
+ * Uses esp_https_ota_begin / esp_https_ota_perform / esp_https_ota_finish —
+ * the pattern from the ESP-IDF advanced_https_ota example.  This API:
+ *   • handles HTTPS→HTTPS redirects (github.com → objects.githubusercontent.com)
+ *   • validates the OTA image header before writing any flash
+ *   • exposes per-chunk progress without a manual event callback
+ */
 
-typedef struct {
-    esp_ota_handle_t handle;
-    int              content_len;
-    int              total_read;
-    esp_err_t        write_err;
-} dl_ctx_t;
-
-static esp_err_t dl_event_cb(esp_http_client_event_t *evt)
+static esp_err_t dl_tls_event_cb(esp_http_client_event_t *evt)
 {
-    dl_ctx_t *ctx = (dl_ctx_t *)evt->user_data;
-
-    if (evt->event_id == HTTP_EVENT_ON_HEADER &&
-        strcasecmp(evt->header_key, "content-length") == 0) {
-        ctx->content_len = atoi(evt->header_value);
-    } else if (evt->event_id == HTTP_EVENT_ON_DATA && evt->data_len > 0) {
-        if (ctx->write_err == ESP_OK)
-            ctx->write_err = esp_ota_write(ctx->handle, evt->data, evt->data_len);
-        ctx->total_read += evt->data_len;
-        if (ctx->content_len > 0)
-            s_progress = ctx->total_read * 100 / ctx->content_len;
+    if (evt->event_id == HTTP_EVENT_ERROR) {
+        int tls_code = 0, tls_flags = 0;
+        esp_tls_get_and_clear_last_error((esp_tls_error_handle_t)evt->data,
+                                         &tls_code, &tls_flags);
+        if (tls_code) {
+            s_tls_err = tls_code;
+            ESP_LOGE(TAG, "OTA TLS error: -0x%04x  flags: 0x%04x", -tls_code, tls_flags);
+        }
     }
     return ESP_OK;
 }
@@ -273,66 +266,69 @@ static void dl_task(void *arg)
     s_progress    = 0;
     s_http_status = 0;
     s_open_err    = ESP_OK;
-
-    const esp_partition_t *part = esp_ota_get_next_update_partition(NULL);
-    if (!part) {
-        ESP_LOGE(TAG, "OTA: no update partition");
-        s_state = OTA_CHECK_ERROR; vTaskDelete(NULL); return;
-    }
-
-    dl_ctx_t ctx = { .write_err = ESP_OK };
-    if (esp_ota_begin(part, OTA_WITH_SEQUENTIAL_WRITES, &ctx.handle) != ESP_OK) {
-        ESP_LOGE(TAG, "OTA: begin failed");
-        s_state = OTA_CHECK_ERROR; vTaskDelete(NULL); return;
-    }
+    s_tls_err     = 0;
 
     ESP_LOGI(TAG, "OTA: downloading %s", s_bin_url);
 
-    esp_http_client_config_t cfg = {
+    esp_http_client_config_t http_cfg = {
         .url                   = s_bin_url,
         .crt_bundle_attach     = esp_crt_bundle_attach,
         .timeout_ms            = 60000,
         .buffer_size           = 4096,
         .max_redirection_count = 5,
-        .event_handler         = dl_event_cb,
-        .user_data             = &ctx,
+        .keep_alive_enable     = true,
+        .event_handler         = dl_tls_event_cb,
     };
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
-    if (!client) {
-        ESP_LOGE(TAG, "OTA: client init failed");
-        esp_ota_abort(ctx.handle);
-        s_state = OTA_CHECK_ERROR; vTaskDelete(NULL); return;
+    esp_https_ota_config_t ota_cfg = {
+        .http_config = &http_cfg,
+    };
+
+    esp_https_ota_handle_t ota_handle = NULL;
+    esp_err_t err = esp_https_ota_begin(&ota_cfg, &ota_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "OTA: begin failed: %s", esp_err_to_name(err));
+        s_open_err = err;
+        s_state    = OTA_CHECK_ERROR;
+        vTaskDelete(NULL);
+        return;
     }
 
-    esp_err_t err = esp_http_client_perform(client);
-    int status    = esp_http_client_get_status_code(client);
-    esp_http_client_cleanup(client);
+    /* Stream firmware into the OTA partition one HTTP buffer at a time */
+    while (1) {
+        err = esp_https_ota_perform(ota_handle);
+        if (err != ESP_ERR_HTTPS_OTA_IN_PROGRESS) break;
+        int img_size = esp_https_ota_get_image_size(ota_handle);
+        if (img_size > 0)
+            s_progress = esp_https_ota_get_image_progress_size(ota_handle) * 100 / img_size;
+    }
 
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "OTA: perform failed: %s", esp_err_to_name(err));
         s_open_err = err;
-        esp_ota_abort(ctx.handle);
-        s_state = OTA_CHECK_ERROR; vTaskDelete(NULL); return;
-    }
-    if (status != 200) {
-        ESP_LOGE(TAG, "OTA: unexpected HTTP %d", status);
-        s_http_status = status;
-        esp_ota_abort(ctx.handle);
-        s_state = OTA_CHECK_ERROR; vTaskDelete(NULL); return;
-    }
-    if (ctx.write_err != ESP_OK) {
-        ESP_LOGE(TAG, "OTA: flash write failed");
-        esp_ota_abort(ctx.handle);
-        s_state = OTA_CHECK_ERROR; vTaskDelete(NULL); return;
+        esp_https_ota_abort(ota_handle);
+        s_state = OTA_CHECK_ERROR;
+        vTaskDelete(NULL);
+        return;
     }
 
-    if (esp_ota_end(ctx.handle) != ESP_OK) {
-        ESP_LOGE(TAG, "OTA: end failed (corrupt image?)");
-        s_state = OTA_CHECK_ERROR; vTaskDelete(NULL); return;
+    if (!esp_https_ota_is_complete_data_received(ota_handle)) {
+        ESP_LOGE(TAG, "OTA: incomplete image received (connection dropped?)");
+        esp_https_ota_abort(ota_handle);
+        s_state = OTA_CHECK_ERROR;
+        vTaskDelete(NULL);
+        return;
     }
-    if (esp_ota_set_boot_partition(part) != ESP_OK) {
-        ESP_LOGE(TAG, "OTA: set boot partition failed");
-        s_state = OTA_CHECK_ERROR; vTaskDelete(NULL); return;
+
+    err = esp_https_ota_finish(ota_handle);
+    if (err != ESP_OK) {
+        if (err == ESP_ERR_OTA_VALIDATE_FAILED)
+            ESP_LOGE(TAG, "OTA: image validation failed — corrupt binary?");
+        else
+            ESP_LOGE(TAG, "OTA: finish failed: %s", esp_err_to_name(err));
+        s_open_err = err;
+        s_state    = OTA_CHECK_ERROR;
+        vTaskDelete(NULL);
+        return;
     }
 
     ESP_LOGI(TAG, "OTA complete — rebooting in 2 s");
