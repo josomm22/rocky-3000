@@ -299,7 +299,7 @@ static void dl_task(void *arg)
         if (err != ESP_ERR_HTTPS_OTA_IN_PROGRESS) break;
         int img_size = esp_https_ota_get_image_size(ota_handle);
         if (img_size > 0)
-            s_progress = esp_https_ota_get_image_progress_size(ota_handle) * 100 / img_size;
+            s_progress = esp_https_ota_get_image_len_read(ota_handle) * 100 / img_size;
     }
 
     if (err != ESP_OK) {
