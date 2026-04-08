@@ -2,13 +2,16 @@
  * ota_checker — background GitHub release check + cloud OTA
  *
  * Flow:
- *   1. check_task: waits for WiFi, syncs NTP, then does a HEAD request to
+ *   1. check_task: waits for WiFi, syncs NTP, then does a GET to
  *      https://github.com/{repo}/releases/latest with redirects disabled.
- *      GitHub responds with 301 and a Location header pointing to
+ *      GitHub responds with 302 and a Location header pointing to
  *      .../releases/tag/vX.Y.Z — the tag is parsed from that URL and
  *      compared with the running firmware.  No JSON, no API token needed.
  *   2. dl_task (started by ota_checker_apply): streams the binary into
- *      the next OTA partition via esp_https_ota, then reboots.
+ *      the next OTA partition via esp_http_client_perform() and
+ *      esp_ota_write() in the HTTP_EVENT_ON_DATA callback, then reboots.
+ *      See the long comment above dl_event_cb for why perform() is used
+ *      instead of esp_https_ota_*.
  *   A periodic_task re-checks every 4 hours.
  */
 
@@ -24,13 +27,13 @@
 #include "esp_netif.h"
 #include "esp_sntp.h"
 #include "lwip/dns.h"
-#include "esp_https_ota.h"
 #include "esp_log.h"
 #include "esp_system.h"
 
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <inttypes.h>
 
 static const char *TAG = "ota_checker";
 
@@ -167,6 +170,8 @@ static void check_task(void *arg)
         .user_agent            = "GBWUI/" APP_VERSION_STRING,
         .disable_auto_redirect = true,
         .max_redirection_count = 0,
+        .buffer_size           = 2048,
+        .buffer_size_tx        = 2048,
         .event_handler         = check_event_cb,
         .user_data             = location,
     };
@@ -238,23 +243,91 @@ static void check_task(void *arg)
 /* ── Download + flash task ────────────────────────────────────── */
 
 /*
- * Uses esp_https_ota_begin / esp_https_ota_perform / esp_https_ota_finish —
- * the pattern from the ESP-IDF advanced_https_ota example.  This API:
- *   • handles HTTPS→HTTPS redirects (github.com → objects.githubusercontent.com)
- *   • validates the OTA image header before writing any flash
- *   • exposes per-chunk progress without a manual event callback
+ * Streams the binary using esp_http_client_perform().
+ *
+ * Why perform() and not esp_https_ota_begin():
+ *   - esp_https_ota_* uses the open/fetch_headers/read streaming path which
+ *     historically cannot re-establish TLS across hosts on a 302 redirect.
+ *     GitHub returns releases/download/... → objects.githubusercontent.com
+ *     which is a different host.
+ *   - perform() does handle that cross-host HTTPS→HTTPS redirect correctly
+ *     by closing the first TLS session and opening a new one.
+ *
+ * Why buffer_size_tx = 4096:
+ *   - The redirected URL is a presigned S3-style URL with a long query
+ *     string (X-Amz-Signature, X-Amz-Credential, etc.), commonly
+ *     1.5–2 KB. The default TX buffer (512 B) cannot hold the full
+ *     "GET <path> HTTP/1.1\r\n" request line, which causes the request
+ *     to be truncated and the connection to be torn down almost
+ *     immediately with no useful error — matching the failure mode
+ *     observed in practice.
+ *
+ * Why keep_alive_enable is NOT set:
+ *   - Cross-host redirect must close the connection anyway.  Leaving
+ *     keep-alive on caused spurious "connection reset" errors.
+ *
+ * Firmware chunks arrive via HTTP_EVENT_ON_DATA and are written directly
+ * into the next OTA partition — same pattern as the working web-upload
+ * endpoint in web_server.c.  Image validation is performed by
+ * esp_ota_end(), which checks the SHA-256 stored in the image trailer.
  */
 
-static esp_err_t dl_tls_event_cb(esp_http_client_event_t *evt)
+typedef struct {
+    esp_ota_handle_t handle;
+    int              content_len;
+    int              total_read;
+    esp_err_t        write_err;
+    bool             header_checked;
+} dl_ctx_t;
+
+static esp_err_t dl_event_cb(esp_http_client_event_t *evt)
 {
-    if (evt->event_id == HTTP_EVENT_ERROR) {
+    dl_ctx_t *ctx = (dl_ctx_t *)evt->user_data;
+
+    switch (evt->event_id) {
+    case HTTP_EVENT_ERROR: {
         int tls_code = 0, tls_flags = 0;
         esp_tls_get_and_clear_last_error((esp_tls_error_handle_t)evt->data,
                                          &tls_code, &tls_flags);
         if (tls_code) {
             s_tls_err = tls_code;
-            ESP_LOGE(TAG, "OTA TLS error: -0x%04x  flags: 0x%04x", -tls_code, tls_flags);
+            ESP_LOGE(TAG, "OTA TLS error: -0x%04x  flags: 0x%04x",
+                     -tls_code, tls_flags);
         }
+        break;
+    }
+    case HTTP_EVENT_ON_HEADER:
+        if (strcasecmp(evt->header_key, "content-length") == 0) {
+            ctx->content_len = atoi(evt->header_value);
+            ESP_LOGI(TAG, "OTA: content-length = %d", ctx->content_len);
+        }
+        break;
+    case HTTP_EVENT_ON_DATA:
+        if (evt->data_len <= 0 || ctx->write_err != ESP_OK) break;
+
+        /* Sanity-check the first byte: ESP32 app images start with the
+         * magic byte 0xE9 (esp_image_header_t::magic).  Bailing out here
+         * prevents us from flashing an HTML error page if GitHub ever
+         * returns a 404 body past the redirect chain. */
+        if (!ctx->header_checked) {
+            ctx->header_checked = true;
+            uint8_t first = ((uint8_t *)evt->data)[0];
+            if (first != 0xE9) {
+                ESP_LOGE(TAG,
+                         "OTA: first byte 0x%02x != ESP image magic 0xE9"
+                         " — server returned non-image body", first);
+                ctx->write_err = ESP_ERR_OTA_VALIDATE_FAILED;
+                break;
+            }
+        }
+
+        ctx->write_err = esp_ota_write(ctx->handle, evt->data, evt->data_len);
+        ctx->total_read += evt->data_len;
+        if (ctx->content_len > 0)
+            s_progress = ctx->total_read * 100 / ctx->content_len;
+        break;
+    default:
+        break;
     }
     return ESP_OK;
 }
@@ -268,70 +341,111 @@ static void dl_task(void *arg)
     s_open_err    = ESP_OK;
     s_tls_err     = 0;
 
-    ESP_LOGI(TAG, "OTA: downloading %s", s_bin_url);
+    const esp_partition_t *part = esp_ota_get_next_update_partition(NULL);
+    if (!part) {
+        ESP_LOGE(TAG, "OTA: no update partition");
+        s_open_err = ESP_ERR_NOT_FOUND;
+        s_state    = OTA_CHECK_ERROR;
+        vTaskDelete(NULL);
+        return;
+    }
+    ESP_LOGI(TAG, "OTA: writing to partition '%s' @ 0x%08" PRIx32,
+             part->label, part->address);
 
-    esp_http_client_config_t http_cfg = {
-        .url                   = s_bin_url,
-        .crt_bundle_attach     = esp_crt_bundle_attach,
-        .timeout_ms            = 60000,
-        .buffer_size           = 4096,
-        .max_redirection_count = 5,
-        .keep_alive_enable     = true,
-        .event_handler         = dl_tls_event_cb,
-    };
-    esp_https_ota_config_t ota_cfg = {
-        .http_config = &http_cfg,
-    };
-
-    esp_https_ota_handle_t ota_handle = NULL;
-    esp_err_t err = esp_https_ota_begin(&ota_cfg, &ota_handle);
+    dl_ctx_t ctx = { .write_err = ESP_OK };
+    esp_err_t err = esp_ota_begin(part, OTA_WITH_SEQUENTIAL_WRITES, &ctx.handle);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "OTA: begin failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "OTA: esp_ota_begin failed: %s", esp_err_to_name(err));
         s_open_err = err;
         s_state    = OTA_CHECK_ERROR;
         vTaskDelete(NULL);
         return;
     }
 
-    /* Stream firmware into the OTA partition one HTTP buffer at a time */
-    while (1) {
-        err = esp_https_ota_perform(ota_handle);
-        if (err != ESP_ERR_HTTPS_OTA_IN_PROGRESS) break;
-        int img_size = esp_https_ota_get_image_size(ota_handle);
-        if (img_size > 0)
-            s_progress = esp_https_ota_get_image_len_read(ota_handle) * 100 / img_size;
+    ESP_LOGI(TAG, "OTA: downloading %s", s_bin_url);
+    ESP_LOGI(TAG, "OTA: free heap before GET: %lu bytes", esp_get_free_heap_size());
+
+    esp_http_client_config_t cfg = {
+        .url                   = s_bin_url,
+        .crt_bundle_attach     = esp_crt_bundle_attach,
+        .timeout_ms            = 60000,
+        .buffer_size           = 4096,  /* RX */
+        .buffer_size_tx        = 4096,  /* TX — must fit long presigned URL */
+        .max_redirection_count = 5,
+        .user_agent            = "GBWUI/" APP_VERSION_STRING,
+        .event_handler         = dl_event_cb,
+        .user_data             = &ctx,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) {
+        ESP_LOGE(TAG, "OTA: client init failed");
+        esp_ota_abort(ctx.handle);
+        s_open_err = ESP_ERR_NO_MEM;
+        s_state    = OTA_CHECK_ERROR;
+        vTaskDelete(NULL);
+        return;
     }
+
+    err = esp_http_client_perform(client);
+    int status = esp_http_client_get_status_code(client);
+    int64_t content_len = esp_http_client_get_content_length(client);
+    esp_http_client_cleanup(client);
+
+    ESP_LOGI(TAG, "OTA: perform done — err=%s  status=%d  got=%d/%lld",
+             esp_err_to_name(err), status, ctx.total_read, (long long)content_len);
 
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "OTA: perform failed: %s", esp_err_to_name(err));
         s_open_err = err;
-        esp_https_ota_abort(ota_handle);
+        esp_ota_abort(ctx.handle);
+        s_state = OTA_CHECK_ERROR;
+        vTaskDelete(NULL);
+        return;
+    }
+    if (status != 200) {
+        ESP_LOGE(TAG, "OTA: unexpected HTTP %d", status);
+        s_http_status = status;
+        esp_ota_abort(ctx.handle);
+        s_state = OTA_CHECK_ERROR;
+        vTaskDelete(NULL);
+        return;
+    }
+    if (ctx.write_err != ESP_OK) {
+        ESP_LOGE(TAG, "OTA: flash write/validate failed: %s",
+                 esp_err_to_name(ctx.write_err));
+        s_open_err = ctx.write_err;
+        esp_ota_abort(ctx.handle);
+        s_state = OTA_CHECK_ERROR;
+        vTaskDelete(NULL);
+        return;
+    }
+    if (ctx.total_read == 0) {
+        ESP_LOGE(TAG, "OTA: zero bytes received");
+        s_open_err = ESP_ERR_INVALID_SIZE;
+        esp_ota_abort(ctx.handle);
         s_state = OTA_CHECK_ERROR;
         vTaskDelete(NULL);
         return;
     }
 
-    if (!esp_https_ota_is_complete_data_received(ota_handle)) {
-        ESP_LOGE(TAG, "OTA: incomplete image received (connection dropped?)");
-        esp_https_ota_abort(ota_handle);
-        s_state = OTA_CHECK_ERROR;
-        vTaskDelete(NULL);
-        return;
-    }
-
-    err = esp_https_ota_finish(ota_handle);
+    err = esp_ota_end(ctx.handle);
     if (err != ESP_OK) {
-        if (err == ESP_ERR_OTA_VALIDATE_FAILED)
-            ESP_LOGE(TAG, "OTA: image validation failed — corrupt binary?");
-        else
-            ESP_LOGE(TAG, "OTA: finish failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "OTA: esp_ota_end failed: %s", esp_err_to_name(err));
+        s_open_err = err;
+        s_state    = OTA_CHECK_ERROR;
+        vTaskDelete(NULL);
+        return;
+    }
+    err = esp_ota_set_boot_partition(part);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "OTA: set_boot_partition failed: %s", esp_err_to_name(err));
         s_open_err = err;
         s_state    = OTA_CHECK_ERROR;
         vTaskDelete(NULL);
         return;
     }
 
-    ESP_LOGI(TAG, "OTA complete — rebooting in 2 s");
+    ESP_LOGI(TAG, "OTA complete (%d bytes) — rebooting in 2 s", ctx.total_read);
     s_progress = 100;
     s_state    = OTA_CHECK_DONE;
     vTaskDelay(pdMS_TO_TICKS(2000));
