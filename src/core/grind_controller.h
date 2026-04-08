@@ -12,6 +12,7 @@
  */
 
 #include <stdbool.h>
+#include <stdint.h>
 
 typedef enum {
     GRIND_IDLE = 0,  /* waiting for user to start                         */
@@ -69,6 +70,24 @@ float grind_ctrl_get_flow_rate(void);
  * Default: 100 ms. Typical range: 30–150 ms. */
 float grind_ctrl_get_motor_latency(void);
 void  grind_ctrl_set_motor_latency(float ms);  /* clamps to [10, 500] */
+
+/* ── Per-shot diagnostics (valid after GRIND_DONE, before ack_done) ── */
+
+/* Scale reading the instant the SSR was first cut (g). */
+float grind_ctrl_get_weight_at_cutoff(void);
+
+/* Settled weight after main coast, before any pulse fires (g).
+ * Equals weight_at_cutoff_g when no coast occurred. */
+float grind_ctrl_get_weight_before_pulses(void);
+
+/* Flow rate captured at the SSR cutoff instant (g/s). */
+float grind_ctrl_get_last_flow_rate(void);
+
+/* Main SSR-on duration from grinder start to first SSR cutoff (ms). */
+uint32_t grind_ctrl_get_grind_ms(void);
+
+/* Number of correction pulses fired this shot (0–3). */
+int grind_ctrl_get_pulse_count(void);
 
 /*
  * Acknowledge DONE → return to IDLE.

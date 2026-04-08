@@ -9,6 +9,7 @@
 #include <stdbool.h>
 
 #define NVS_NS   "grind_hist"
+#define KEY_VER  "ver"
 #define KEY_CNT  "count"
 #define KEY_HEAD "head"
 #define KEY_DATA "records"
@@ -21,6 +22,7 @@ static void nvs_save(void)
 {
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_u8(h,  KEY_VER,  (uint8_t)HISTORY_VER);
     nvs_set_u16(h, KEY_CNT,  (uint16_t)s_count);
     nvs_set_u16(h, KEY_HEAD, (uint16_t)s_head);
     nvs_set_blob(h, KEY_DATA, s_buf, sizeof(s_buf));
@@ -31,7 +33,21 @@ static void nvs_save(void)
 void grind_history_init(void)
 {
     nvs_handle_t h;
-    if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+
+    /* Version check — wipe incompatible records rather than loading garbage */
+    uint8_t ver = 0;
+    nvs_get_u8(h, KEY_VER, &ver);
+    if (ver != HISTORY_VER) {
+        nvs_erase_key(h, KEY_DATA);
+        nvs_erase_key(h, KEY_CNT);
+        nvs_erase_key(h, KEY_HEAD);
+        nvs_set_u8(h, KEY_VER, (uint8_t)HISTORY_VER);
+        nvs_commit(h);
+        nvs_close(h);
+        return; /* starts fresh */
+    }
+
     uint16_t cnt = 0, head = 0;
     nvs_get_u16(h, KEY_CNT,  &cnt);
     nvs_get_u16(h, KEY_HEAD, &head);
@@ -42,10 +58,22 @@ void grind_history_init(void)
     if (head <  HISTORY_MAX) s_head  = head;
 }
 
-void grind_history_record(float target_g, float result_g)
+void grind_history_record(float target_g, float result_g,
+                          float weight_at_cutoff_g, float weight_before_pulses_g,
+                          float flow_g_s, float offset_g,
+                          uint32_t timestamp, uint16_t grind_ms,
+                          uint8_t pulse_count)
 {
-    s_buf[s_head].target_g = target_g;
-    s_buf[s_head].result_g = result_g;
+    s_buf[s_head].target_g              = target_g;
+    s_buf[s_head].result_g              = result_g;
+    s_buf[s_head].weight_at_cutoff_g    = weight_at_cutoff_g;
+    s_buf[s_head].weight_before_pulses_g = weight_before_pulses_g;
+    s_buf[s_head].flow_g_s              = flow_g_s;
+    s_buf[s_head].offset_g              = offset_g;
+    s_buf[s_head].timestamp             = timestamp;
+    s_buf[s_head].grind_ms              = grind_ms;
+    s_buf[s_head].pulse_count           = pulse_count;
+    s_buf[s_head]._pad                  = 0;
     s_head = (s_head + 1) % HISTORY_MAX;
     if (s_count < HISTORY_MAX) s_count++;
     nvs_save();

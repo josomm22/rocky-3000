@@ -166,13 +166,26 @@ static const char HIST_TAIL[] =
       "var rows=shots.slice(-20).reverse();"
       "var html='<table><thead><tr>"
         "<th>#</th><th>Target</th><th>Dispensed</th><th>Delta</th>"
+        "<th>Duration</th><th>At Cutoff</th><th>Pre-pulse</th>"
+        "<th>Flow</th><th>Offset</th><th>Pulses</th>"
       "</tr></thead><tbody>';"
       "rows.forEach(function(s,i){"
         "var d=s.r-s.t;"
         "var cls=d>0.3?'pos':d<-0.3?'neg':'neu';"
-        "html+='<tr><td>'+(n-i)+'</td><td>'+fmt1(s.t)+'g</td>"
+        "var pcls=s.p>0?'pos':'';"
+        "var ts=s.ts>0?new Date(s.ts*1000).toLocaleString():'';"
+        "html+='<tr>"
+          "<td title=\\''+ts+'\\'>'+( n-i)+'</td>"
+          "<td>'+fmt1(s.t)+'g</td>"
           "<td>'+fmt1(s.r)+'g</td>"
-          "<td class=\\''+cls+'\\'>'+(d>=0?'+':'')+d.toFixed(2)+'g</td></tr>';"
+          "<td class=\\''+cls+'\\'>'+(d>=0?'+':'')+d.toFixed(2)+'g</td>"
+          "<td>'+(s.ms?(s.ms/1000).toFixed(1)+'s':'-')+'</td>"
+          "<td>'+(s.wc?s.wc.toFixed(2)+'g':'-')+'</td>"
+          "<td>'+(s.wp?s.wp.toFixed(2)+'g':'-')+'</td>"
+          "<td>'+(s.f?s.f.toFixed(1)+'g/s':'-')+'</td>"
+          "<td>'+s.o.toFixed(2)+'g</td>"
+          "<td class=\\''+pcls+'\\'>'+(s.p||0)+'</td>"
+        "</tr>';"
       "});"
       "html+='</tbody></table>';"
       "document.write(html);"
@@ -205,10 +218,17 @@ static esp_err_t handle_history(httpd_req_t *req)
 
     /* Inject shots array as JS literal */
     httpd_resp_send_chunk(req, "[", 1);
-    char buf[48];
+    char buf[128];
     for (int i = 0; i < n; i++) {
-        snprintf(buf, sizeof(buf), "%s{\"t\":%.1f,\"r\":%.1f}",
-                 i ? "," : "", recs[i].target_g, recs[i].result_g);
+        snprintf(buf, sizeof(buf),
+                 "%s{\"t\":%.1f,\"r\":%.1f,\"wc\":%.2f,\"wp\":%.2f"
+                 ",\"f\":%.2f,\"o\":%.2f,\"ms\":%u,\"p\":%u,\"ts\":%lu}",
+                 i ? "," : "",
+                 recs[i].target_g, recs[i].result_g,
+                 recs[i].weight_at_cutoff_g, recs[i].weight_before_pulses_g,
+                 recs[i].flow_g_s, recs[i].offset_g,
+                 (unsigned)recs[i].grind_ms, (unsigned)recs[i].pulse_count,
+                 (unsigned long)recs[i].timestamp);
         httpd_resp_send_chunk(req, buf, HTTPD_RESP_USE_STRLEN);
     }
     httpd_resp_send_chunk(req, "]", 1);
@@ -261,10 +281,17 @@ static esp_err_t handle_history_json(httpd_req_t *req)
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send_chunk(req, "{\"shots\":[", HTTPD_RESP_USE_STRLEN);
-    char buf[48];
+    char buf[128];
     for (int i = 0; i < n; i++) {
-        snprintf(buf, sizeof(buf), "%s{\"t\":%.1f,\"r\":%.1f}",
-                 i ? "," : "", recs[i].target_g, recs[i].result_g);
+        snprintf(buf, sizeof(buf),
+                 "%s{\"t\":%.1f,\"r\":%.1f,\"wc\":%.2f,\"wp\":%.2f"
+                 ",\"f\":%.2f,\"o\":%.2f,\"ms\":%u,\"p\":%u,\"ts\":%lu}",
+                 i ? "," : "",
+                 recs[i].target_g, recs[i].result_g,
+                 recs[i].weight_at_cutoff_g, recs[i].weight_before_pulses_g,
+                 recs[i].flow_g_s, recs[i].offset_g,
+                 (unsigned)recs[i].grind_ms, (unsigned)recs[i].pulse_count,
+                 (unsigned long)recs[i].timestamp);
         httpd_resp_send_chunk(req, buf, HTTPD_RESP_USE_STRLEN);
     }
     httpd_resp_send_chunk(req, "]}", HTTPD_RESP_USE_STRLEN);

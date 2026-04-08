@@ -22,7 +22,8 @@
 static void record_n(int n)
 {
     for (int i = 0; i < n; i++)
-        grind_history_record((float)(i + 1), (float)(i + 1) + 0.1f);
+        grind_history_record((float)(i + 1), (float)(i + 1) + 0.1f,
+                             0, 0, 0, 0, 0, 0, 0);
 }
 
 /* ── setUp / tearDown ─────────────────────────────────────── */
@@ -46,7 +47,7 @@ void test_init_empty(void)
 
 void test_record_single(void)
 {
-    grind_history_record(18.0f, 18.2f);
+    grind_history_record(18.0f, 18.2f, 0, 0, 0, 0, 0, 0, 0);
     TEST_ASSERT_EQUAL_INT(1, grind_history_count());
 
     grind_record_t out[1];
@@ -59,8 +60,8 @@ void test_record_single(void)
 void test_record_order(void)
 {
     /* Record A then B; get should return [A, B] */
-    grind_history_record(18.0f, 18.1f);
-    grind_history_record(20.0f, 20.3f);
+    grind_history_record(18.0f, 18.1f, 0, 0, 0, 0, 0, 0, 0);
+    grind_history_record(20.0f, 20.3f, 0, 0, 0, 0, 0, 0, 0);
 
     grind_record_t out[2];
     int n = grind_history_get(out, 2);
@@ -83,7 +84,7 @@ void test_circular_wrap(void)
     record_n(HISTORY_MAX);
 
     /* This 51st record overwrites the oldest (target=1) */
-    grind_history_record(99.0f, 99.9f);
+    grind_history_record(99.0f, 99.9f, 0, 0, 0, 0, 0, 0, 0);
 
     TEST_ASSERT_EQUAL_INT(HISTORY_MAX, grind_history_count());
 
