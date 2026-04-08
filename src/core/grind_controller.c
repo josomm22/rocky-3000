@@ -240,6 +240,12 @@ static int s_settle_ticks = 0;
  * the value needed for pulse duration calculation in settle_complete(). */
 static float s_pulse_flow_rate = 0.0f;
 
+/* Per-shot diagnostics captured during the grind cycle */
+static float    s_weight_at_cutoff     = 0.0f; /* weight when SSR first cut       */
+static float    s_weight_before_pulses = 0.0f; /* settled weight before any pulse  */
+static uint32_t s_grind_start_ms       = 0;    /* lv_tick_get() when SSR turned on */
+static uint32_t s_grind_ms             = 0;    /* SSR-on duration (ms)             */
+
 /* Pulse refinement */
 static int s_pulse_attempts = 0;
 static lv_timer_t *s_pulse_timer = NULL;
@@ -318,6 +324,12 @@ static void pulse_done_cb(lv_timer_t *t)
  */
 static void settle_complete(void)
 {
+    /* Capture the settled weight before any pulse fires.
+     * On pulse 1, 2, 3 s_pulse_attempts > 0 — value stays frozen so it
+     * always represents post-main-coast weight, not post-pulse weight. */
+    if (s_pulse_attempts == 0)
+        s_weight_before_pulses = s_weight;
+
     float shortfall = s_target - s_weight;
     /* Use flow rate captured at the main-stop instant.  s_flow_rate_g_s
      * drops to 0 while the scale coasts, so we must use the saved value. */
@@ -427,6 +439,8 @@ static void poll_cb(lv_timer_t *t)
          * This value drives pulse duration in settle_complete(). */
         s_pulse_flow_rate = (float)s_flow_rate_g_s;
 #endif
+        s_weight_at_cutoff = s_weight;
+        s_grind_ms = lv_tick_get() - s_grind_start_ms;
         ssr_set(0);
         s_pulse_attempts = 0;
         s_settle_ticks = 0;
@@ -452,6 +466,7 @@ static void tare_done_cb(lv_timer_t *t)
         return;
     s_state = GRIND_RUNNING;
     ssr_set(1);
+    s_grind_start_ms = lv_tick_get();
 }
 
 /* ── Public API ─────────────────────────────────────────────── */
@@ -494,6 +509,10 @@ void grind_ctrl_start(float target_g)
     s_settle_ticks = 0;
     s_pulse_attempts = 0;
     s_pulse_flow_rate = 0.0f;
+    s_weight_at_cutoff     = 0.0f;
+    s_weight_before_pulses = 0.0f;
+    s_grind_start_ms       = 0;
+    s_grind_ms             = 0;
     s_state = GRIND_TARING;
 
     grind_ctrl_tare();
@@ -618,6 +637,12 @@ void grind_ctrl_set_motor_latency(float ms)
     s_motor_latency_ms = clampf(ms, 10.0f, 500.0f);
 }
 
+float    grind_ctrl_get_weight_at_cutoff(void)     { return s_weight_at_cutoff; }
+float    grind_ctrl_get_weight_before_pulses(void) { return s_weight_before_pulses; }
+float    grind_ctrl_get_last_flow_rate(void)       { return s_pulse_flow_rate; }
+uint32_t grind_ctrl_get_grind_ms(void)             { return s_grind_ms; }
+int      grind_ctrl_get_pulse_count(void)          { return s_pulse_attempts; }
+
 void grind_ctrl_ack_done(void)
 {
     if (s_state != GRIND_DONE)
@@ -626,5 +651,7 @@ void grind_ctrl_ack_done(void)
     s_state = GRIND_IDLE;
     s_weight = 0.0f;
     s_pulse_attempts = 0;
+    s_weight_at_cutoff     = 0.0f;
+    s_weight_before_pulses = 0.0f;
     lv_timer_pause(s_timer);
 }

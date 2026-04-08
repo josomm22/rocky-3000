@@ -4,6 +4,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "lvgl.h"
@@ -199,7 +200,16 @@ static void grind_poll_cb(lv_timer_t *t)
         lv_label_set_text(s_lbl_grind, buf);
         set_grinding_ui(false);
 
-        grind_history_record(s_weights[s_active], result);
+        grind_history_record(
+            s_weights[s_active], result,
+            grind_ctrl_get_weight_at_cutoff(),
+            grind_ctrl_get_weight_before_pulses(),
+            grind_ctrl_get_last_flow_rate(),
+            grind_ctrl_get_offset(),
+            (uint32_t)time(NULL),
+            (uint16_t)grind_ctrl_get_grind_ms(),
+            (uint8_t)grind_ctrl_get_pulse_count()
+        );
         show_grind_toast(result, s_weights[s_active]);
 
         s_done_timer = lv_timer_create(done_reset_cb, 2000, NULL);
