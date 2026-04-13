@@ -347,7 +347,7 @@ function LiveTab() {
     let alive = true
     async function poll() {
       try {
-        const r = await fetch('/api/sensor')
+        const r = await fetch('/api/sensor', { cache: 'no-store' })
         if (!r.ok) throw new Error()
         const d = await r.json()
         if (alive) { setSensor(d); setError(false) }
@@ -419,7 +419,7 @@ export default function App() {
   const fetchHistory = useCallback(async () => {
     setSelected(new Set())
     try {
-      const r = await fetch('/api/history')
+      const r = await fetch('/api/history', { cache: 'no-store' })
       if (!r.ok) throw new Error()
       const d = await r.json()
       setShots(d.shots || [])

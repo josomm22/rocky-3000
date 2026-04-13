@@ -262,6 +262,7 @@ static esp_err_t handle_history_delete_selected(httpd_req_t *req)
 
     grind_history_delete_indices(indices, count);
     httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
 }
@@ -270,6 +271,7 @@ static esp_err_t handle_history_clear(httpd_req_t *req)
 {
     grind_history_clear();
     httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
 }
@@ -280,6 +282,7 @@ static esp_err_t handle_history_json(httpd_req_t *req)
     int n = grind_history_get(recs, HISTORY_MAX);
 
     httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_send_chunk(req, "{\"shots\":[", HTTPD_RESP_USE_STRLEN);
     char buf[128];
     for (int i = 0; i < n; i++) {
@@ -310,6 +313,7 @@ static esp_err_t handle_sensor(httpd_req_t *req)
     snprintf(buf, sizeof(buf), "{\"live_g\":%.2f,\"raw_g\":%.2f,\"cal\":%.4f}",
              live, raw, cal);
     httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_sendstr(req, buf);
     return ESP_OK;
 }
