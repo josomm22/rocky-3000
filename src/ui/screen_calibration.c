@@ -49,7 +49,7 @@ static void poll_cb(lv_timer_t *t)
     if (s_step == 1) {
         w = grind_ctrl_get_live_weight();   /* 0.0 in demo (idle) */
     } else {
-        /* Step 2: show raw (uncalibrated) reading.
+        /* Step 2: show calibrated reading (what the scale currently displays).
          * Demo: derive from known weight with a fixed -0.3 % bias so the
          * wizard has a non-trivial factor to compute. */
         w = grind_ctrl_is_demo() ? s_known_g * 0.997f
@@ -106,11 +106,14 @@ static void go_step3(lv_event_t *e)
 {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
 
-    /* Capture raw reading at this moment */
+    /* Capture the *calibrated* reading at this moment.
+     * grind_ctrl_get_live_weight() already has the current cal factor baked in
+     * (raw × old_cal), so the correct new factor is:
+     *   new_cal = old_cal × (known / displayed)            */
     s_raw_reading = grind_ctrl_is_demo() ? s_known_g * 0.997f
                                          : grind_ctrl_get_live_weight();
     if (s_raw_reading < 0.001f) s_raw_reading = 0.001f;  /* guard div/0 */
-    s_cal_factor = s_known_g / s_raw_reading;
+    s_cal_factor = grind_ctrl_get_cal_factor() * s_known_g / s_raw_reading;
 
     s_step = 3;
     update_title();
