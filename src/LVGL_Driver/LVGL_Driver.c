@@ -65,6 +65,9 @@ void example_increase_lvgl_tick(void *arg)
     lv_tick_inc(EXAMPLE_LVGL_TICK_PERIOD_MS);
 }
 
+/* True while a wake-touch is still being held — suppress until finger lifts. */
+static bool s_suppress_until_release = false;
+
 void example_touchpad_read(lv_indev_t *indev, lv_indev_data_t *data)
 {
     uint16_t touchpad_x[1] = {0};
@@ -81,6 +84,9 @@ void example_touchpad_read(lv_indev_t *indev, lv_indev_data_t *data)
         /* Wake the screen on first touch; consume the event so it doesn't
          * trigger any UI element while the user just wanted to wake. */
         if (disp_mgr_intercept_touch())
+            s_suppress_until_release = true;
+
+        if (s_suppress_until_release)
         {
             data->state = LV_INDEV_STATE_RELEASED;
             return;
@@ -91,6 +97,7 @@ void example_touchpad_read(lv_indev_t *indev, lv_indev_data_t *data)
     }
     else
     {
+        s_suppress_until_release = false;
         data->state = LV_INDEV_STATE_RELEASED;
     }
 }
