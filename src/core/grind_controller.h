@@ -41,7 +41,7 @@ grind_state_t grind_ctrl_get_state(void);
 float         grind_ctrl_get_weight(void);  /* live weight, grams            */
 float         grind_ctrl_get_result(void);  /* final weight; valid when DONE */
 
-/* Pre-stop offset (auto-tuned after each shot). Persisted externally. */
+/* Pre-stop offset (auto-tuned after each shot). Persisted to NVS. */
 float grind_ctrl_get_offset(void);
 void  grind_ctrl_set_offset(float g);
 
@@ -66,8 +66,8 @@ bool grind_ctrl_is_demo(void);
 float grind_ctrl_get_flow_rate(void);
 
 /* Motor latency: total delay from SSR de-energise to burrs stopping (ms).
- * Used to predict coast distance. Persisted externally via NVS.
- * Default: 100 ms. Typical range: 30–150 ms. */
+ * Used to predict coast distance. Auto-tuned from observed coast each shot
+ * and persisted to NVS. Default: 250 ms. Typical range: 100–400 ms. */
 float grind_ctrl_get_motor_latency(void);
 void  grind_ctrl_set_motor_latency(float ms);  /* clamps to [10, 500] */
 
@@ -101,3 +101,10 @@ void grind_ctrl_ack_done(void);
  */
 void grind_ctrl_purge(void);
 bool grind_ctrl_is_purging(void);
+
+/*
+ * HX711 health: true when the sensor has produced a fresh reading within the
+ * last HX711_HEALTH_TIMEOUT_MS.  grind_ctrl_start() refuses to begin a grind
+ * when this returns false.
+ */
+bool grind_ctrl_hx711_healthy(void);

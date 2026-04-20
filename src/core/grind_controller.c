@@ -24,8 +24,22 @@
 
 #include "grind_controller.h"
 #include "lvgl.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 #include <math.h>
 #include <stdint.h>
+#include <string.h>
+
+/* ── NVS persistence ────────────────────────────────────────────
+ * Tuned values (offset, motor latency, calibration factor) outlive
+ * reboots so the user doesn't lose autotune convergence or wizard data. */
+#define GRIND_NVS_NS    "grind_cfg"
+#define GRIND_KEY_OFF   "offset_g"
+#define GRIND_KEY_MLAT  "mlat_ms"
+#define GRIND_KEY_CAL   "cal_factor"
+
+static void save_settings(void);
+static void load_settings(void);
 
 /* ── Build-time config ──────────────────────────────────────── */
 
@@ -34,12 +48,24 @@
 #endif
 
 /* Pre-stop residual bias (on top of dynamic coast prediction).
- * Starts at 0; auto-tune adjusts it to absorb any remaining systematic error. */
+ * Starts at 0; auto-tune adjusts it to absorb any remaining systematic error.
+ * Negative offset is allowed so persistent undershoot (e.g. when motor-latency
+ * autotune has over-predicted coast) can still be corrected. */
 #define DEFAULT_OFFSET_G 0.0f
-#define AUTOTUNE_FACTOR 0.5f
-#define AUTOTUNE_DEADBAND 0.1f /* ignore deltas smaller than this (g) */
-#define OFFSET_MIN_G 0.0f
+#define AUTOTUNE_FACTOR 0.3f    /* gentler step — noisy shots don't swing offset */
+#define AUTOTUNE_DEADBAND 0.1f  /* ignore deltas smaller than this (g) */
+#define OFFSET_MIN_G -2.0f
 #define OFFSET_MAX_G 5.0f
+
+/* Autotune validity gates — skip adjustment when the shot was anomalous
+ * (too short, or flow never established).  Prevents a single sensor glitch
+ * or bean-starvation shot from corrupting offset / motor-latency. */
+#define AUTOTUNE_MIN_GRIND_MS 500
+#define AUTOTUNE_MIN_FLOW_G_S 0.5f
+
+/* Motor-latency autotune: EMA factor applied to each shot's observed coast.
+ * 0.3 converges in ~5 shots and resists single-shot noise. */
+#define MOTOR_LATENCY_ALPHA 0.3f
 
 /* Dynamic coast prediction: stop_at = target - coast_g - s_offset
  *   coast_g = (motor_latency_ms / 1000) × flow_rate_g_s × COAST_RATIO
@@ -108,6 +134,11 @@ static volatile bool s_settle_buf_full = false;
  * Reduces white noise by √8 ≈ 2.8× before EMA runs. */
 #define HX711_AVG_SAMPLES 8
 
+/* HX711 health monitoring */
+#define HX711_READY_TIMEOUT_MS 500   /* max wait for a single DOUT ready       */
+#define HX711_HEALTH_TIMEOUT_MS 2000 /* stale after 2 s without a fresh block  */
+#define HX711_MAX_RETRIES 3          /* power-cycle attempts before giving up  */
+
 /* EMA on top of the block average: α=0.5 → one block period (~200 ms)
  * to settle; the 16-sample block average already handles noise. */
 #define HX711_EMA_ALPHA 1.0f
@@ -117,37 +148,62 @@ static volatile bool s_settle_buf_full = false;
  * A 10 g/s grinder at max can add ~2 g per 200 ms block; 10 g is 5× margin. */
 #define SPIKE_REJECT_DELTA_G 10.0f
 
+/* Health tracking: timestamp of last successful block read.
+ * Written by hx711_task, read by LVGL poll timer & grind_ctrl_start. */
+static volatile uint32_t s_hx711_last_ok_tick = 0;
+static volatile bool s_hx711_healthy = false;
+
+/* Tare completion flag: set by hx711_task after tare finishes,
+ * checked by tare_done_cb before transitioning to GRIND_RUNNING. */
+static volatile bool s_tare_complete = false;
+
 static void hx711_task(void *arg)
 {
     (void)arg;
     hx711_init(GPIO_HX711_DATA, GPIO_HX711_CLK);
-    hx711_tare();
+
+    /* Initial tare with recovery — keep trying until the sensor responds. */
+    while (!hx711_tare()) {
+        hx711_power_cycle();
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
 
     /* Prime the EMA with the first valid reading so it doesn't
      * crawl up from 0.0 on startup. */
     float g;
-    while (!hx711_read_grams(s_cal_factor, &g))
-        vTaskDelay(1);
-    s_latest_weight = g;
+    if (hx711_wait_ready(HX711_READY_TIMEOUT_MS) && hx711_read_grams(s_cal_factor, &g))
+        s_latest_weight = g;
+
+    s_hx711_last_ok_tick = xTaskGetTickCount();
+    s_hx711_healthy = true;
 
     while (1)
     {
         if (s_tare_requested)
         {
-            hx711_tare();
-            s_latest_weight = 0.0f;
+            s_tare_complete = false;
+            if (hx711_tare()) {
+                s_latest_weight = 0.0f;
+                s_tare_complete = true;
+            }
+            /* If tare failed, s_tare_complete stays false — tare_done_cb
+             * will not transition to GRIND_RUNNING. */
             s_tare_requested = false;
         }
 
-        /* Collect HX711_AVG_SAMPLES readings, blocking on each conversion.
-         * Track the single highest sample for a trimmed mean (drop max). */
+        /* Collect HX711_AVG_SAMPLES readings, blocking on each conversion
+         * with a timeout.  If any sample times out, attempt recovery. */
         float sum = 0.0f;
         float max_g = -1e9f;
         int n = 0;
+        bool block_ok = true;
         for (int i = 0; i < HX711_AVG_SAMPLES; i++)
         {
-            while (!hx711_is_ready())
-                vTaskDelay(1);
+            if (!hx711_wait_ready(HX711_READY_TIMEOUT_MS))
+            {
+                block_ok = false;
+                break;
+            }
             if (hx711_read_grams(s_cal_factor, &g))
             {
                 sum += g;
@@ -156,6 +212,29 @@ static void hx711_task(void *arg)
                 n++;
             }
         }
+
+        if (!block_ok)
+        {
+            /* HX711 is not responding — attempt power-cycle recovery. */
+            s_hx711_healthy = false;
+            for (int retry = 0; retry < HX711_MAX_RETRIES; retry++)
+            {
+                hx711_power_cycle();
+                vTaskDelay(pdMS_TO_TICKS(200));
+                if (hx711_wait_ready(HX711_READY_TIMEOUT_MS))
+                {
+                    /* Sensor is back — re-tare to get a clean baseline. */
+                    if (hx711_tare()) {
+                        s_latest_weight = 0.0f;
+                        s_hx711_last_ok_tick = xTaskGetTickCount();
+                        s_hx711_healthy = true;
+                    }
+                    break;
+                }
+            }
+            continue; /* restart the main loop */
+        }
+
         if (n > 1)
         {
             /* Layer 1: trimmed mean — drop the single highest sample to
@@ -186,6 +265,9 @@ static void hx711_task(void *arg)
                 }
             }
             /* else: spike detected — keep previous weight and flow rate */
+
+            s_hx711_last_ok_tick = xTaskGetTickCount();
+            s_hx711_healthy = true;
         }
     }
 }
@@ -266,16 +348,90 @@ static float clampf(float v, float lo, float hi)
     return v < lo ? lo : (v > hi ? hi : v);
 }
 
+/* ── NVS persistence helpers ────────────────────────────────────
+ * Floats are stored as their u32 bit pattern via memcpy — matches the
+ * existing convention in screen_main.c (preset weights). */
+
+static void load_settings(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(GRIND_NVS_NS, NVS_READONLY, &h) != ESP_OK)
+        return;
+
+    uint32_t bits;
+    float f;
+    if (nvs_get_u32(h, GRIND_KEY_OFF, &bits) == ESP_OK) {
+        memcpy(&f, &bits, sizeof(f));
+        s_offset = clampf(f, OFFSET_MIN_G, OFFSET_MAX_G);
+    }
+    if (nvs_get_u32(h, GRIND_KEY_MLAT, &bits) == ESP_OK) {
+        memcpy(&f, &bits, sizeof(f));
+        s_motor_latency_ms = clampf(f, 10.0f, 500.0f);
+    }
+    if (nvs_get_u32(h, GRIND_KEY_CAL, &bits) == ESP_OK) {
+        memcpy(&f, &bits, sizeof(f));
+        s_cal_factor = clampf(f, 0.00001f, 10.0f);
+    }
+    nvs_close(h);
+}
+
+static void save_settings(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(GRIND_NVS_NS, NVS_READWRITE, &h) != ESP_OK)
+        return;
+
+    uint32_t bits;
+    float f;
+
+    f = s_offset;             memcpy(&bits, &f, sizeof(bits));
+    nvs_set_u32(h, GRIND_KEY_OFF,  bits);
+    f = s_motor_latency_ms;   memcpy(&bits, &f, sizeof(bits));
+    nvs_set_u32(h, GRIND_KEY_MLAT, bits);
+    f = s_cal_factor;         memcpy(&bits, &f, sizeof(bits));
+    nvs_set_u32(h, GRIND_KEY_CAL,  bits);
+
+    nvs_commit(h);
+    nvs_close(h);
+}
+
 static void run_autotune(void)
 {
+    /* Gate: skip anomalous shots (manual stop mid-grind, sensor glitch,
+     * bean starvation) so a single bad reading doesn't corrupt tuning. */
+    if (s_grind_ms < AUTOTUNE_MIN_GRIND_MS)
+        return;
+    if (s_pulse_flow_rate < AUTOTUNE_MIN_FLOW_G_S)
+        return;
+
+#if !GRIND_DEMO_MODE
+    /* Motor-latency autotune: derive the real total latency from the
+     * observed coast, subtract the known measurement latency, and EMA
+     * the motor component.  This makes the coast prediction self-correcting
+     * so the user doesn't have to tune motor_latency_ms by hand. */
+    float actual_coast_g = s_weight_before_pulses - s_weight_at_cutoff;
+    if (actual_coast_g > 0.02f) {
+        float meas_latency_ms   = (HX711_AVG_SAMPLES * 1000.0f / HX711_POLL_HZ) * 0.5f;
+        float total_latency_ms  = (actual_coast_g / s_pulse_flow_rate) * 1000.0f;
+        float observed_motor_ms = total_latency_ms - meas_latency_ms;
+        s_motor_latency_ms = clampf(
+            (1.0f - MOTOR_LATENCY_ALPHA) * s_motor_latency_ms +
+            MOTOR_LATENCY_ALPHA * observed_motor_ms,
+            10.0f, 500.0f);
+    }
+#endif
+
+    /* Pre-stop offset autotune */
     float delta = s_result - s_target;
     if (delta < 0.0f)
         delta = -delta; /* abs */
-    if (delta <= AUTOTUNE_DEADBAND)
-        return;
+    if (delta > AUTOTUNE_DEADBAND) {
+        delta = s_result - s_target; /* restore sign */
+        s_offset = clampf(s_offset + delta * AUTOTUNE_FACTOR, OFFSET_MIN_G, OFFSET_MAX_G);
+    }
 
-    delta = s_result - s_target; /* restore sign */
-    s_offset = clampf(s_offset + delta * AUTOTUNE_FACTOR, OFFSET_MIN_G, OFFSET_MAX_G);
+    /* Persist tuned values so they survive reboots. */
+    save_settings();
 }
 
 static void ssr_set(int on)
@@ -458,12 +614,36 @@ static void poll_cb(lv_timer_t *t)
 
 /* ── Tare-settle callback ────────────────────────────────────── */
 
+/* Maximum time to wait for tare to complete before aborting.
+ * The 1 s tare settle timer fires first; if tare hasn't finished by
+ * TARE_TIMEOUT_MS total, tare_done_cb gives up. */
+#define TARE_TIMEOUT_MS 3000
+static uint32_t s_tare_start_ms = 0;
+
 static void tare_done_cb(lv_timer_t *t)
 {
     (void)t;
     s_tare_timer = NULL; /* auto-deleted (repeat_count = 1) */
     if (s_state != GRIND_TARING)
         return;
+
+    if (!s_tare_complete)
+    {
+        /* Tare hasn't finished yet — reschedule unless we've exceeded
+         * the overall timeout. */
+        uint32_t elapsed = lv_tick_get() - s_tare_start_ms;
+        if (elapsed < TARE_TIMEOUT_MS)
+        {
+            s_tare_timer = lv_timer_create(tare_done_cb, 100, NULL);
+            lv_timer_set_repeat_count(s_tare_timer, 1);
+            return;
+        }
+        /* Timed out — abort the grind. */
+        s_state = GRIND_IDLE;
+        lv_timer_pause(s_timer);
+        return;
+    }
+
     s_state = GRIND_RUNNING;
     ssr_set(1);
     s_grind_start_ms = lv_tick_get();
@@ -476,6 +656,10 @@ void grind_ctrl_init(void)
     s_state = GRIND_IDLE;
     s_weight = 0.0f;
     s_offset = DEFAULT_OFFSET_G;
+
+    /* Restore persisted offset / motor latency / cal factor before the
+     * HX711 task starts, so the first reading uses the calibrated factor. */
+    load_settings();
 
 #if !GRIND_DEMO_MODE
     /* Detach UART0 from its default pins (GPIO43=TXD, GPIO44=RXD) so the
@@ -503,6 +687,12 @@ void grind_ctrl_start(float target_g)
     if (s_state == GRIND_RUNNING || s_state == GRIND_TARING)
         return;
 
+#if !GRIND_DEMO_MODE
+    /* Refuse to start if the HX711 hasn't produced a fresh reading recently. */
+    if (!s_hx711_healthy)
+        return;
+#endif
+
     s_target = target_g;
     s_weight = 0.0f;
     s_result = 0.0f;
@@ -513,6 +703,8 @@ void grind_ctrl_start(float target_g)
     s_weight_before_pulses = 0.0f;
     s_grind_start_ms       = 0;
     s_grind_ms             = 0;
+    s_tare_complete        = false;
+    s_tare_start_ms        = lv_tick_get();
     s_state = GRIND_TARING;
 
     grind_ctrl_tare();
@@ -587,6 +779,7 @@ float grind_ctrl_get_offset(void) { return s_offset; }
 void grind_ctrl_set_offset(float g)
 {
     s_offset = clampf(g, OFFSET_MIN_G, OFFSET_MAX_G);
+    save_settings();
 }
 
 float grind_ctrl_get_cal_factor(void) { return s_cal_factor; }
@@ -594,7 +787,7 @@ float grind_ctrl_get_cal_factor(void) { return s_cal_factor; }
 void grind_ctrl_set_cal_factor(float f)
 {
     s_cal_factor = clampf(f, 0.00001f, 10.0f);
-    /* TODO (real mode): persist to NVS, apply to hx711_task */
+    save_settings();
 }
 
 float grind_ctrl_get_live_weight(void)
@@ -635,6 +828,7 @@ float grind_ctrl_get_motor_latency(void)
 void grind_ctrl_set_motor_latency(float ms)
 {
     s_motor_latency_ms = clampf(ms, 10.0f, 500.0f);
+    save_settings();
 }
 
 float    grind_ctrl_get_weight_at_cutoff(void)     { return s_weight_at_cutoff; }
@@ -654,4 +848,13 @@ void grind_ctrl_ack_done(void)
     s_weight_at_cutoff     = 0.0f;
     s_weight_before_pulses = 0.0f;
     lv_timer_pause(s_timer);
+}
+
+bool grind_ctrl_hx711_healthy(void)
+{
+#if GRIND_DEMO_MODE
+    return true;
+#else
+    return s_hx711_healthy;
+#endif
 }
