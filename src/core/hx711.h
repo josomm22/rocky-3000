@@ -24,11 +24,18 @@ void hx711_init(gpio_num_t dout, gpio_num_t pd_sck);
 /*
  * Block until TARE_SAMPLES readings are available, average them, and store
  * as the zero offset.  Intended to be called once at startup from hx711_task.
+ * Returns true on success, false if a timeout occurred during any sample.
  */
-void hx711_tare(void);
+bool hx711_tare(void);
 
 /* True when DOUT is low (conversion complete). */
 bool hx711_is_ready(void);
+
+/*
+ * Block until hx711_is_ready() or timeout_ms elapses.
+ * Returns true if ready, false on timeout.
+ */
+bool hx711_wait_ready(uint32_t timeout_ms);
 
 /*
  * If a sample is ready, read it, apply cal_factor, subtract tare offset,
@@ -36,3 +43,10 @@ bool hx711_is_ready(void);
  * Returns false (and leaves *out_g unchanged) when not ready.
  */
 bool hx711_read_grams(float cal_factor, float *out_g);
+
+/*
+ * Power-cycle the HX711: drive CLK high for >60 µs (enters power-down),
+ * then low (wakes up).  The next conversion takes ~100 ms at 80 Hz.
+ * Use this to recover from a stuck DOUT line.
+ */
+void hx711_power_cycle(void);

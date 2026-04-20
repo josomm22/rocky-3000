@@ -68,15 +68,27 @@ static int32_t read_raw(void)
     return (int32_t)raw;
 }
 
-void hx711_tare(void)
+bool hx711_wait_ready(uint32_t timeout_ms)
+{
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
+    while (!hx711_is_ready()) {
+        if (xTaskGetTickCount() >= deadline)
+            return false;
+        vTaskDelay(1);
+    }
+    return true;
+}
+
+bool hx711_tare(void)
 {
     int64_t sum = 0;
     for (int i = 0; i < TARE_SAMPLES; i++) {
-        while (!hx711_is_ready())
-            vTaskDelay(1);
+        if (!hx711_wait_ready(500))
+            return false;
         sum += read_raw();
     }
     s_tare_offset = (int32_t)(sum / TARE_SAMPLES);
+    return true;
 }
 
 bool hx711_read_grams(float cal_factor, float *out_g)
@@ -87,4 +99,12 @@ bool hx711_read_grams(float cal_factor, float *out_g)
     int32_t raw = read_raw() - s_tare_offset;
     *out_g = (float)raw * cal_factor;
     return true;
+}
+
+void hx711_power_cycle(void)
+{
+    gpio_set_level(s_pd_sck, 1);
+    esp_rom_delay_us(100);  /* >60 µs enters power-down mode */
+    gpio_set_level(s_pd_sck, 0);
+    /* Next conversion will be ready in ~100 ms (80 Hz ODR) */
 }

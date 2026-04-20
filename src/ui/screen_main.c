@@ -78,6 +78,8 @@ static void position_sel_frame(int idx);
  * Toast
  * ═══════════════════════════════════════════════════════════════ */
 
+static void show_error_toast(const char *msg);  /* forward decl */
+
 static void toast_dismiss_cb(lv_timer_t *t)
 {
     (void)t;
@@ -177,7 +179,15 @@ static void grind_poll_cb(lv_timer_t *t)
 
     grind_state_t state = grind_ctrl_get_state();
 
-    if (state == GRIND_TARING) {
+    if (state == GRIND_IDLE &&
+        s_btn_stop && !lv_obj_has_flag(s_btn_stop, LV_OBJ_FLAG_HIDDEN)) {
+        /* Tare timed out or start was rejected — revert UI. */
+        lv_label_set_text(s_lbl_grind, "GRIND");
+        set_grinding_ui(false);
+        if (!grind_ctrl_hx711_healthy())
+            show_error_toast("Scale not responding\nCheck sensor connection");
+    }
+    else if (state == GRIND_TARING) {
         lv_label_set_text(s_lbl_grind, "TARE");
         set_grinding_ui(true);
     }
@@ -248,12 +258,53 @@ static void pill_longpress_cb(lv_event_t *e)
     screen_preset_edit_load(idx, s_weights[idx]);
 }
 
+static void show_error_toast(const char *msg)
+{
+    if (!s_scr) return;
+
+    if (s_toast_timer) {
+        lv_timer_delete(s_toast_timer);
+        s_toast_timer = NULL;
+    }
+    if (s_toast_cont) {
+        lv_obj_delete(s_toast_cont);
+        s_toast_cont = NULL;
+    }
+
+    lv_obj_t *cont = lv_obj_create(s_scr);
+    lv_obj_set_width(cont, SCR_W - 40);
+    lv_obj_set_height(cont, LV_SIZE_CONTENT);
+    lv_obj_align(cont, LV_ALIGN_BOTTOM_MID, 0, -16);
+    lv_obj_set_style_bg_color(cont, COL_ERROR, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(cont, LV_OPA_90, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(cont, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_radius(cont, 12, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_all(cont, 14, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_shadow_width(cont, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_remove_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *lbl = lv_label_create(cont);
+    lv_label_set_text(lbl, msg);
+    lv_obj_set_style_text_color(lbl, lv_color_white(), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_24, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_width(lbl, SCR_W - 40 - 28);
+
+    s_toast_cont  = cont;
+    s_toast_timer = lv_timer_create(toast_dismiss_cb, 3000, NULL);
+    lv_timer_set_repeat_count(s_toast_timer, 1);
+}
+
 static void grind_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED)
         return;
     if (grind_ctrl_get_state() != GRIND_IDLE)
         return;
+
+    if (!grind_ctrl_hx711_healthy()) {
+        show_error_toast("Scale not responding\nCheck sensor connection");
+        return;
+    }
 
     grind_ctrl_start(s_weights[s_active]);
     lv_label_set_text(s_lbl_grind, "TARE");
