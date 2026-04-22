@@ -58,6 +58,13 @@ float grind_ctrl_get_live_weight(void);
 /* Re-zero the scale (safe to call from LVGL context; tare runs in hx711_task). */
 void grind_ctrl_tare(void);
 
+/* Calibration mode: while enabled, the HX711 task bypasses its inter-block
+ * spike gate so the live weight tracks large step changes (a calibration
+ * weight being placed on a tared scale) immediately. The calibration screen
+ * enables this on entry and disables it on exit; leave off during grinding
+ * so motor-EMI spike rejection stays active. */
+void grind_ctrl_set_calibration_mode(bool on);
+
 /* True when compiled with GRIND_DEMO_MODE=1 (no real hardware). */
 bool grind_ctrl_is_demo(void);
 

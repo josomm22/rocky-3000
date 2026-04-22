@@ -157,6 +157,11 @@ static volatile bool s_hx711_healthy = false;
  * checked by tare_done_cb before transitioning to GRIND_RUNNING. */
 static volatile bool s_tare_complete = false;
 
+/* Calibration mode: when true, hx711_task bypasses the inter-block delta
+ * gate so placing a heavy calibration weight produces an immediate reading.
+ * Set via grind_ctrl_set_calibration_mode() from the calibration screen. */
+static volatile bool s_calibration_mode = false;
+
 static void hx711_task(void *arg)
 {
     (void)arg;
@@ -242,8 +247,12 @@ static void hx711_task(void *arg)
             float avg = (sum - max_g) / (float)(n - 1);
 
             /* Layer 2: inter-block delta gate — reject the entire block if
-             * the jump is physically impossible (spike from motor start etc.) */
-            if (fabsf(avg - s_latest_weight) < SPIKE_REJECT_DELTA_G)
+             * the jump is physically impossible (spike from motor start etc.)
+             * Bypassed during calibration: the user intentionally places a
+             * large weight on the scale and the motor is off, so there is no
+             * EMI to filter and the display must follow the real reading. */
+            if (s_calibration_mode
+                || fabsf(avg - s_latest_weight) < SPIKE_REJECT_DELTA_G)
             {
                 s_latest_weight = HX711_EMA_ALPHA * avg + (1.0f - HX711_EMA_ALPHA) * s_latest_weight;
 
@@ -803,6 +812,15 @@ void grind_ctrl_tare(void)
 {
 #if !GRIND_DEMO_MODE
     s_tare_requested = true;
+#endif
+}
+
+void grind_ctrl_set_calibration_mode(bool on)
+{
+#if !GRIND_DEMO_MODE
+    s_calibration_mode = on;
+#else
+    (void)on;
 #endif
 }
 
