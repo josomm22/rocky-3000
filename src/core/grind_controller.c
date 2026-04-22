@@ -148,6 +148,12 @@ static volatile bool s_settle_buf_full = false;
  * A 10 g/s grinder at max can add ~2 g per 200 ms block; 10 g is 5× margin. */
 #define SPIKE_REJECT_DELTA_G 10.0f
 
+/* After this many consecutive rejected blocks, accept the next reading.
+ * Motor EMI spikes are brief (1-2 blocks); a sustained delta means the
+ * weight really did change abruptly (e.g. placing a calibration weight or
+ * portafilter on the scale) and we must let the display catch up. */
+#define SPIKE_REJECT_MAX_STREAK 3
+
 /* Health tracking: timestamp of last successful block read.
  * Written by hx711_task, read by LVGL poll timer & grind_ctrl_start. */
 static volatile uint32_t s_hx711_last_ok_tick = 0;
@@ -242,9 +248,15 @@ static void hx711_task(void *arg)
             float avg = (sum - max_g) / (float)(n - 1);
 
             /* Layer 2: inter-block delta gate — reject the entire block if
-             * the jump is physically impossible (spike from motor start etc.) */
-            if (fabsf(avg - s_latest_weight) < SPIKE_REJECT_DELTA_G)
+             * the jump is physically impossible (spike from motor start etc.)
+             * Escape hatch: after SPIKE_REJECT_MAX_STREAK consecutive
+             * rejections, accept the block so legitimate abrupt weight
+             * changes (calibration weight, portafilter) can settle in. */
+            static int reject_streak = 0;
+            if (fabsf(avg - s_latest_weight) < SPIKE_REJECT_DELTA_G
+                || reject_streak >= SPIKE_REJECT_MAX_STREAK)
             {
+                reject_streak = 0;
                 s_latest_weight = HX711_EMA_ALPHA * avg + (1.0f - HX711_EMA_ALPHA) * s_latest_weight;
 
                 /* Flow rate: weight delta over the fixed block period.
@@ -264,7 +276,11 @@ static void hx711_task(void *arg)
                     s_settle_buf_full = true;
                 }
             }
-            /* else: spike detected — keep previous weight and flow rate */
+            else
+            {
+                reject_streak++;
+                /* keep previous weight and flow rate */
+            }
 
             s_hx711_last_ok_tick = xTaskGetTickCount();
             s_hx711_healthy = true;
