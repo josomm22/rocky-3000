@@ -70,6 +70,7 @@ static void scr_delete_cb(lv_event_t *e)
 {
     (void)e;
     if (s_poll) { lv_timer_delete(s_poll); s_poll = NULL; }
+    grind_ctrl_set_calibration_mode(false);
     s_content    = NULL;
     s_lbl_title  = NULL;
     s_lbl_weight = NULL;
@@ -413,7 +414,8 @@ void screen_calibration_load(void)
     s_raw_reading = 0.0f;
     s_cal_factor  = 1.0f;
 
-    grind_ctrl_tare();   /* zero the scale on entry */
+    grind_ctrl_set_calibration_mode(true); /* bypass HX711 spike gate */
+    grind_ctrl_tare();                     /* zero the scale on entry */
 
     lv_obj_t *scr = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr, COL_BG, LV_PART_MAIN | LV_STATE_DEFAULT);
