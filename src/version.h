@@ -10,7 +10,7 @@
 
 #define APP_VERSION_MAJOR 1
 #define APP_VERSION_MINOR 2
-#define APP_VERSION_PATCH 12
+#define APP_VERSION_PATCH 13
 
 /* Stringify helpers */
 #define _VER_STR(x) #x
