@@ -78,6 +78,12 @@ float grind_ctrl_get_flow_rate(void);
 float grind_ctrl_get_motor_latency(void);
 void  grind_ctrl_set_motor_latency(float ms);  /* clamps to [10, 500] */
 
+/* Autotune master switch.  When false, run_autotune() is a no-op and the
+ * pre-stop offset stays exactly where the user (or the last enabled-shot)
+ * put it.  Persisted to NVS so it survives reboots. Default: true. */
+bool grind_ctrl_get_autotune_enabled(void);
+void grind_ctrl_set_autotune_enabled(bool on);
+
 /* ── Per-shot diagnostics (valid after GRIND_DONE, before ack_done) ── */
 
 /* Scale reading the instant the SSR was first cut (g). */

@@ -83,6 +83,30 @@ static const char HIST_HEAD[] =
     "</style></head><body>"
     "<h1>&#9749; Grind History</h1>"
     "<p class='sub'>Shot log — target vs dispensed weight</p>"
+    /* Tuning panel — manual offset + autotune toggle.
+     * Populated by GET /api/tune; submits via POST /api/tune. */
+    "<div class='chart-wrap' id='tune-card'>"
+      "<div class='chart-title'>Tuning</div>"
+      "<div style='display:flex;gap:16px;flex-wrap:wrap;align-items:center'>"
+        "<label style='flex:1;min-width:200px'>"
+          "<div style='font-size:.75rem;color:#666680;margin-bottom:6px'>"
+            "Offset (g) — subtracted from target before stop"
+          "</div>"
+          "<input id='tn-offset' type='number' step='0.05' "
+            "style='width:100%;padding:8px 10px;background:#111118;color:#e8e8f0;"
+            "border:1px solid #25253a;border-radius:8px;font-size:.95rem'>"
+        "</label>"
+        "<label style='display:flex;align-items:center;gap:8px;font-size:.9rem;cursor:pointer'>"
+          "<input id='tn-auto' type='checkbox' style='width:18px;height:18px;cursor:pointer'>"
+          "Autotune enabled"
+        "</label>"
+        "<button id='tn-save' style='padding:10px 22px;background:#4fc3f7;color:#111118;"
+          "border:none;border-radius:8px;cursor:pointer;font-size:.9rem;font-weight:600'>"
+          "Save"
+        "</button>"
+      "</div>"
+      "<div id='tn-status' style='margin-top:10px;font-size:.85rem;color:#666680;min-height:18px'></div>"
+    "</div>"
     /* Live scale card — populated by /api/sensor polling */
     "<div class='stats'>"
       "<div class='stat'><div class='stat-val' id='sv-live'>--</div>"
@@ -204,6 +228,35 @@ static const char HIST_TAIL[] =
       "}).catch(function(){});"
       "setTimeout(poll,500);"
     "})();"
+    "</script>"
+    /* Tuning panel: GET on load, POST on save click */
+    "<script>"
+    "(function(){"
+      "var off=document.getElementById('tn-offset');"
+      "var au=document.getElementById('tn-auto');"
+      "var btn=document.getElementById('tn-save');"
+      "var st=document.getElementById('tn-status');"
+      "function fill(d){"
+        "off.value=d.offset.toFixed(2);"
+        "off.min=d.offset_min;off.max=d.offset_max;"
+        "au.checked=!!d.autotune;}"
+      "function load(){"
+        "fetch('/api/tune').then(function(r){return r.json();})"
+          ".then(fill)"
+          ".catch(function(){st.textContent='Failed to load current tuning';});}"
+      "btn.onclick=function(){"
+        "var body='offset='+encodeURIComponent(off.value)+"
+          "'&autotune='+(au.checked?'1':'0');"
+        "btn.disabled=true;st.textContent='Saving…';"
+        "fetch('/api/tune',{method:'POST',"
+          "headers:{'Content-Type':'application/x-www-form-urlencoded'},"
+          "body:body})"
+          ".then(function(r){return r.json();})"
+          ".then(function(d){fill(d);st.textContent='Saved — offset '+d.offset.toFixed(2)+'g, autotune '+(d.autotune?'on':'off');})"
+          ".catch(function(){st.textContent='Save failed';})"
+          ".finally(function(){btn.disabled=false;});};"
+      "load();"
+    "})();"
     "</script></body></html>";
 
 /* ── History handlers ─────────────────────────────────────────── */
@@ -299,6 +352,125 @@ static esp_err_t handle_history_json(httpd_req_t *req)
     }
     httpd_resp_send_chunk(req, "]}", HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
+}
+
+/* ── Tuning endpoints ─────────────────────────────────────────── */
+/*
+ * GET  /api/tune  → { offset, autotune, motor_latency, ... limits }
+ * POST /api/tune  → body is form-urlencoded: optional offset=, autotune=,
+ *                    motor_latency=. Missing keys are left untouched.
+ *                    Returns the same JSON shape as GET so the client can
+ *                    refresh its view from the response.
+ *
+ * Form-urlencoded was chosen over JSON to avoid pulling in cJSON for one
+ * tiny endpoint; the values are all numeric so parsing is trivial.
+ */
+
+#define OFFSET_MIN_API -2.0f
+#define OFFSET_MAX_API  5.0f
+#define MLAT_MIN_API   10.0f
+#define MLAT_MAX_API  500.0f
+
+static void send_tune_json(httpd_req_t *req)
+{
+    char buf[192];
+    snprintf(buf, sizeof(buf),
+             "{\"offset\":%.2f,\"autotune\":%s,\"motor_latency\":%.0f,"
+             "\"offset_min\":%.1f,\"offset_max\":%.1f,"
+             "\"motor_latency_min\":%.0f,\"motor_latency_max\":%.0f}",
+             grind_ctrl_get_offset(),
+             grind_ctrl_get_autotune_enabled() ? "true" : "false",
+             grind_ctrl_get_motor_latency(),
+             OFFSET_MIN_API, OFFSET_MAX_API,
+             MLAT_MIN_API, MLAT_MAX_API);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_sendstr(req, buf);
+}
+
+static esp_err_t handle_tune_get(httpd_req_t *req)
+{
+    send_tune_json(req);
+    return ESP_OK;
+}
+
+/* Look up a key in a form-urlencoded body and parse its value as float.
+ * Returns true and writes *out on success. */
+static bool form_get_float(const char *body, const char *key, float *out)
+{
+    size_t klen = strlen(key);
+    const char *p = body;
+    while (*p) {
+        if (strncmp(p, key, klen) == 0 && p[klen] == '=') {
+            char *end;
+            float v = strtof(p + klen + 1, &end);
+            if (end != p + klen + 1) {
+                *out = v;
+                return true;
+            }
+            return false;
+        }
+        const char *amp = strchr(p, '&');
+        if (!amp) break;
+        p = amp + 1;
+    }
+    return false;
+}
+
+/* Same as form_get_float, but parses 0/1/true/false into a bool. */
+static bool form_get_bool(const char *body, const char *key, bool *out)
+{
+    size_t klen = strlen(key);
+    const char *p = body;
+    while (*p) {
+        if (strncmp(p, key, klen) == 0 && p[klen] == '=') {
+            const char *v = p + klen + 1;
+            if (*v == '1' || strncmp(v, "true",  4) == 0) { *out = true;  return true; }
+            if (*v == '0' || strncmp(v, "false", 5) == 0) { *out = false; return true; }
+            return false;
+        }
+        const char *amp = strchr(p, '&');
+        if (!amp) break;
+        p = amp + 1;
+    }
+    return false;
+}
+
+static esp_err_t handle_tune_post(httpd_req_t *req)
+{
+    char body[256] = {0};
+    int total = req->content_len;
+    if (total > (int)sizeof(body) - 1) total = sizeof(body) - 1;
+    int received = 0;
+    while (received < total) {
+        int n = httpd_req_recv(req, body + received, total - received);
+        if (n == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (n <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad body");
+            return ESP_FAIL;
+        }
+        received += n;
+    }
+    body[received] = '\0';
+
+    float fv;
+    bool  bv;
+    if (form_get_float(body, "offset", &fv)) {
+        if (fv < OFFSET_MIN_API) fv = OFFSET_MIN_API;
+        if (fv > OFFSET_MAX_API) fv = OFFSET_MAX_API;
+        grind_ctrl_set_offset(fv);
+    }
+    if (form_get_float(body, "motor_latency", &fv)) {
+        if (fv < MLAT_MIN_API) fv = MLAT_MIN_API;
+        if (fv > MLAT_MAX_API) fv = MLAT_MAX_API;
+        grind_ctrl_set_motor_latency(fv);
+    }
+    if (form_get_bool(body, "autotune", &bv)) {
+        grind_ctrl_set_autotune_enabled(bv);
+    }
+
+    send_tune_json(req);
     return ESP_OK;
 }
 
@@ -623,7 +795,7 @@ void web_server_start(void)
     httpd_config_t cfg       = HTTPD_DEFAULT_CONFIG();
     cfg.recv_wait_timeout    = 60;
     cfg.send_wait_timeout    = 10;
-    cfg.max_uri_handlers     = 16;   /* room for portal routes too */
+    cfg.max_uri_handlers     = 18;   /* room for portal routes + /api/tune */
     cfg.uri_match_fn         = httpd_uri_match_wildcard;
 
     if (httpd_start(&s_server, &cfg) != ESP_OK) {
@@ -650,6 +822,12 @@ void web_server_start(void)
     static const httpd_uri_t sensor_uri = {
         .uri = "/api/sensor", .method = HTTP_GET, .handler = handle_sensor
     };
+    static const httpd_uri_t tune_get_uri = {
+        .uri = "/api/tune", .method = HTTP_GET, .handler = handle_tune_get
+    };
+    static const httpd_uri_t tune_post_uri = {
+        .uri = "/api/tune", .method = HTTP_POST, .handler = handle_tune_post
+    };
     static const httpd_uri_t ota_uri = {
         .uri = "/ota", .method = HTTP_GET, .handler = handle_ota
     };
@@ -672,6 +850,8 @@ void web_server_start(void)
     httpd_register_uri_handler(server, &history_clear_uri);
     httpd_register_uri_handler(server, &history_delete_selected_uri);
     httpd_register_uri_handler(server, &sensor_uri);
+    httpd_register_uri_handler(server, &tune_get_uri);
+    httpd_register_uri_handler(server, &tune_post_uri);
     httpd_register_uri_handler(server, &ota_uri);
     httpd_register_uri_handler(server, &update_uri);
     httpd_register_uri_handler(server, &ota_status_uri);

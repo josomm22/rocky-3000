@@ -37,6 +37,7 @@
 #define GRIND_KEY_OFF   "offset_g"
 #define GRIND_KEY_MLAT  "mlat_ms"
 #define GRIND_KEY_CAL   "cal_factor"
+#define GRIND_KEY_AT_EN "at_enabled"
 
 static void save_settings(void);
 static void load_settings(void);
@@ -62,6 +63,29 @@ static void load_settings(void);
  * or bean-starvation shot from corrupting offset / motor-latency. */
 #define AUTOTUNE_MIN_GRIND_MS 500
 #define AUTOTUNE_MIN_FLOW_G_S 0.5f
+
+/* Hard ceiling on per-shot offset adjustment.  Keeps the offset stable once
+ * the user has dialled in a sweet spot — a single weird shot can nudge it
+ * by at most this amount, never sending it to the clamp floor in one go. */
+#define AUTOTUNE_MAX_STEP_G 0.15f
+
+/* Reject the shot from autotune when |result - target| exceeds this fraction
+ * of the target (with an absolute floor).  Catches sensor-spike-induced
+ * early cutoffs (result far below target) and runaway pulses (result far
+ * above) without rejecting normal espresso-dose noise. */
+#define AUTOTUNE_MAX_DELTA_FRAC 0.25f
+#define AUTOTUNE_MAX_DELTA_FLOOR_G 1.5f
+
+/* Plausibility ceiling on flow rate.  A real espresso grinder peaks around
+ * 5–10 g/s; anything above this is a sensor glitch.  Used to gate autotune
+ * AND clamped on the live value so coast_g can't blow up. */
+#define MAX_PLAUSIBLE_FLOW_G_S 15.0f
+
+/* Hard ceiling on the predicted coast distance applied during the grind.
+ * coast_g = (motor_latency + meas_latency) × flow × COAST_RATIO can balloon
+ * if flow rate spikes past the spike gate; this cap stops a corrupt flow
+ * value from making stop_at deeply negative and cutting the shot at <1 s. */
+#define MAX_COAST_G 3.0f
 
 /* Motor-latency autotune: EMA factor applied to each shot's observed coast.
  * 0.3 converges in ~5 shots and resists single-shot noise. */
@@ -257,11 +281,17 @@ static void hx711_task(void *arg)
                 s_latest_weight = HX711_EMA_ALPHA * avg + (1.0f - HX711_EMA_ALPHA) * s_latest_weight;
 
                 /* Flow rate: weight delta over the fixed block period.
-                 * Block period = HX711_AVG_SAMPLES / HX711_POLL_HZ (seconds). */
+                 * Block period = HX711_AVG_SAMPLES / HX711_POLL_HZ (seconds).
+                 * Hard-capped at MAX_PLAUSIBLE_FLOW_G_S so a single block that
+                 * sneaks past the spike gate (e.g. a 9 g jump just under the
+                 * 10 g threshold) can't blow up coast_g and cut the shot at
+                 * <1 s.  Real espresso grinders peak around 5–10 g/s. */
                 static float prev_block_weight = 0.0f;
                 float dt_s = (float)HX711_AVG_SAMPLES / (float)HX711_POLL_HZ;
                 float rate = (avg - prev_block_weight) / dt_s;
-                s_flow_rate_g_s = (rate > 0.0f) ? rate : 0.0f;
+                if (rate < 0.0f) rate = 0.0f;
+                if (rate > MAX_PLAUSIBLE_FLOW_G_S) rate = MAX_PLAUSIBLE_FLOW_G_S;
+                s_flow_rate_g_s = rate;
                 prev_block_weight = avg;
 
                 /* Settling detection buffer: push latest block average. */
@@ -314,6 +344,8 @@ static grind_state_t s_state = GRIND_IDLE;
 static float s_target = 18.0f;
 static float s_offset = DEFAULT_OFFSET_G; /* residual bias, auto-tuned */
 static float s_motor_latency_ms = MOTOR_LATENCY_MS_DEFAULT;
+static bool  s_autotune_enabled = true;   /* user-toggle; persisted to NVS */
+static bool  s_manual_stop = false;       /* set by grind_ctrl_stop, cleared each start */
 static float s_weight = 0.0f;
 static float s_result = 0.0f;
 static lv_timer_t *s_timer = NULL;
@@ -381,6 +413,10 @@ static void load_settings(void)
         memcpy(&f, &bits, sizeof(f));
         s_cal_factor = clampf(f, 0.00001f, 10.0f);
     }
+    uint8_t en;
+    if (nvs_get_u8(h, GRIND_KEY_AT_EN, &en) == ESP_OK) {
+        s_autotune_enabled = (en != 0);
+    }
     nvs_close(h);
 }
 
@@ -399,6 +435,7 @@ static void save_settings(void)
     nvs_set_u32(h, GRIND_KEY_MLAT, bits);
     f = s_cal_factor;         memcpy(&bits, &f, sizeof(bits));
     nvs_set_u32(h, GRIND_KEY_CAL,  bits);
+    nvs_set_u8(h, GRIND_KEY_AT_EN, s_autotune_enabled ? 1 : 0);
 
     nvs_commit(h);
     nvs_close(h);
@@ -406,11 +443,43 @@ static void save_settings(void)
 
 static void run_autotune(void)
 {
-    /* Gate: skip anomalous shots (manual stop mid-grind, sensor glitch,
-     * bean starvation) so a single bad reading doesn't corrupt tuning. */
+    /* User toggle — once they've found their sweet spot they can lock the
+     * offset by disabling autotune from the web UI. */
+    if (!s_autotune_enabled)
+        return;
+
+    /* Manual stop is not a normal completion; the user aborted mid-shot,
+     * so the result doesn't reflect what the controller would have produced. */
+    if (s_manual_stop)
+        return;
+
+    /* Gate: skip anomalous shots (too short, flow never established) so a
+     * single bad reading doesn't corrupt tuning. */
     if (s_grind_ms < AUTOTUNE_MIN_GRIND_MS)
         return;
     if (s_pulse_flow_rate < AUTOTUNE_MIN_FLOW_G_S)
+        return;
+
+    /* Sensor-spike gate: if the settled weight is BELOW the weight that
+     * triggered cutoff, the cutoff was caused by a transient spike (motor
+     * EMI), not real coffee.  The "result" is meaningless for tuning. */
+    if (s_weight_before_pulses + 0.05f < s_weight_at_cutoff)
+        return;
+
+    /* Implausibly high flow rate at cutoff → almost certainly a sensor
+     * glitch.  Real espresso grinders top out around 10 g/s. */
+    if (s_pulse_flow_rate > MAX_PLAUSIBLE_FLOW_G_S)
+        return;
+
+    /* Anomalous result magnitude — far below or far above target indicates
+     * a starved hopper, jammed grinder, or a sensor anomaly that survived
+     * the gates above.  Tuning from these shots wrecks convergence. */
+    float abs_delta = s_result - s_target;
+    if (abs_delta < 0.0f) abs_delta = -abs_delta;
+    float max_delta = s_target * AUTOTUNE_MAX_DELTA_FRAC;
+    if (max_delta < AUTOTUNE_MAX_DELTA_FLOOR_G)
+        max_delta = AUTOTUNE_MAX_DELTA_FLOOR_G;
+    if (abs_delta > max_delta)
         return;
 
 #if !GRIND_DEMO_MODE
@@ -430,13 +499,14 @@ static void run_autotune(void)
     }
 #endif
 
-    /* Pre-stop offset autotune */
-    float delta = s_result - s_target;
-    if (delta < 0.0f)
-        delta = -delta; /* abs */
-    if (delta > AUTOTUNE_DEADBAND) {
-        delta = s_result - s_target; /* restore sign */
-        s_offset = clampf(s_offset + delta * AUTOTUNE_FACTOR, OFFSET_MIN_G, OFFSET_MAX_G);
+    /* Pre-stop offset autotune — capped per shot so the offset cannot swing
+     * to the clamp floor in a single step.  Once dialled in, even a noisy
+     * outlier nudges by at most AUTOTUNE_MAX_STEP_G. */
+    if (abs_delta > AUTOTUNE_DEADBAND) {
+        float step = (s_result - s_target) * AUTOTUNE_FACTOR;
+        if (step >  AUTOTUNE_MAX_STEP_G) step =  AUTOTUNE_MAX_STEP_G;
+        if (step < -AUTOTUNE_MAX_STEP_G) step = -AUTOTUNE_MAX_STEP_G;
+        s_offset = clampf(s_offset + step, OFFSET_MIN_G, OFFSET_MAX_G);
     }
 
     /* Persist tuned values so they survive reboots. */
@@ -589,12 +659,17 @@ static void poll_cb(lv_timer_t *t)
 
     /* Dynamic stop threshold: coast_g = (motor_latency + measurement_latency) × flow × ratio.
      * Measurement latency ≈ half the block period (avg staleness of s_latest_weight).
-     * Falls back to COAST_FALLBACK_G until flow rate is established. */
+     * Falls back to COAST_FALLBACK_G until flow rate is established.
+     * Hard-capped at MAX_COAST_G as a defence-in-depth: even with the flow-rate
+     * cap in hx711_task, a sudden motor_latency_ms drift could in principle
+     * push coast past target.  This guarantees the grinder runs at least until
+     * (target - MAX_COAST_G - offset) g of real coffee is on the scale. */
     float flow = (float)s_flow_rate_g_s;
     float meas_latency_ms = (HX711_AVG_SAMPLES * 1000.0f / HX711_POLL_HZ) * 0.5f;
     float coast_g = (flow > 0.01f)
                         ? ((s_motor_latency_ms + meas_latency_ms) / 1000.0f) * flow * COAST_RATIO
                         : COAST_FALLBACK_G;
+    if (coast_g > MAX_COAST_G) coast_g = MAX_COAST_G;
     float stop_at = s_target - coast_g - s_offset;
 
     if (s_weight >= stop_at)
@@ -713,6 +788,7 @@ void grind_ctrl_start(float target_g)
     s_grind_start_ms       = 0;
     s_grind_ms             = 0;
     s_tare_complete        = false;
+    s_manual_stop          = false;
     s_tare_start_ms        = lv_tick_get();
     s_state = GRIND_TARING;
 
@@ -751,6 +827,7 @@ void grind_ctrl_stop(void)
     if (s_state == GRIND_RUNNING || s_state == GRIND_SETTLING || s_state == GRIND_PULSING)
     {
         s_result = s_weight;
+        s_manual_stop = true;   /* flag the abort so run_autotune skips */
         run_autotune();
         s_state = GRIND_DONE;
     }
@@ -846,6 +923,14 @@ float grind_ctrl_get_motor_latency(void)
 void grind_ctrl_set_motor_latency(float ms)
 {
     s_motor_latency_ms = clampf(ms, 10.0f, 500.0f);
+    save_settings();
+}
+
+bool grind_ctrl_get_autotune_enabled(void) { return s_autotune_enabled; }
+
+void grind_ctrl_set_autotune_enabled(bool on)
+{
+    s_autotune_enabled = on;
     save_settings();
 }
 
