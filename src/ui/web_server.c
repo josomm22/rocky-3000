@@ -216,7 +216,7 @@ static const char HIST_TAIL[] =
     "}else{"
       "document.write('<div class=\\'empty\\'>No grind history yet.</div>');"
     "}"
-    "document.write('<a class=\\'btn\\' href=\\'/history\\'>&#8635; Refresh</a>');"
+    "document.write('<a class=\\'btn\\' href=\\'/offset\\'>&#8635; Refresh</a>');"
     "</script>"
     /* Live sensor polling — updates the Scale card every 500 ms */
     "<script>"
@@ -293,23 +293,28 @@ static size_t format_records_array(char *out, size_t cap,
 
 static esp_err_t handle_history(httpd_req_t *req)
 {
-    grind_record_t recs[HISTORY_MAX];
+    /*
+     * recs[] (1.6 KB) and the records JSON buffer (~6.4 KB) both go on the
+     * heap.  Allocating 8 KB on the default 4 KB httpd task stack was
+     * panicking the task, which produced an immediate TCP RST with zero
+     * bytes sent — the symptom the user observed.
+     */
+    grind_record_t *recs = malloc(sizeof(grind_record_t) * HISTORY_MAX);
+    char           *body = malloc(HIST_RECORDS_BUF_SIZE);
+    if (!recs || !body) {
+        free(recs); free(body);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return ESP_FAIL;
+    }
     int n = grind_history_get(recs, HISTORY_MAX);
+    size_t body_len = format_records_array(body, HIST_RECORDS_BUF_SIZE, recs, n);
 
     /*
      * One TCP write per `httpd_resp_send_chunk` call: previously we sent
      * 50+ chunks (1 for "[", 1 per record, 1 for "]", plus head and tail).
      * On a marginal WiFi link the cumulative round-trip cost timed out the
-     * page.  Build the records array into a single heap buffer and send
-     * it as one chunk — total comes down to 3 chunks (head, array, tail).
+     * page.  Now: 3 chunks total (head, array, tail).
      */
-    char *body = malloc(HIST_RECORDS_BUF_SIZE);
-    if (!body) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
-        return ESP_FAIL;
-    }
-    size_t body_len = format_records_array(body, HIST_RECORDS_BUF_SIZE, recs, n);
-
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_send_chunk(req, HIST_HEAD, HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, body, body_len);
@@ -317,6 +322,7 @@ static esp_err_t handle_history(httpd_req_t *req)
     httpd_resp_send_chunk(req, NULL, 0);
 
     free(body);
+    free(recs);
     return ESP_OK;
 }
 
@@ -360,17 +366,17 @@ static esp_err_t handle_history_clear(httpd_req_t *req)
 
 static esp_err_t handle_history_json(httpd_req_t *req)
 {
-    grind_record_t recs[HISTORY_MAX];
-    int n = grind_history_get(recs, HISTORY_MAX);
-
-    /* Same chunking-overhead concern as handle_history; build the entire
-     * JSON body in one buffer and send it as a single response. */
-    size_t cap = HIST_RECORDS_BUF_SIZE + 16; /* +space for {"shots":...} wrap */
-    char *body = malloc(cap);
-    if (!body) {
+    /* Same heap-vs-stack reasoning as handle_history. */
+    grind_record_t *recs = malloc(sizeof(grind_record_t) * HISTORY_MAX);
+    size_t cap   = HIST_RECORDS_BUF_SIZE + 16; /* +space for {"shots":...} wrap */
+    char  *body  = malloc(cap);
+    if (!recs || !body) {
+        free(recs); free(body);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
         return ESP_FAIL;
     }
+    int n = grind_history_get(recs, HISTORY_MAX);
+
     size_t off = (size_t)snprintf(body, cap, "{\"shots\":");
     off += format_records_array(body + off, cap - off, recs, n);
     if (off < cap) body[off++] = '}';
@@ -381,6 +387,7 @@ static esp_err_t handle_history_json(httpd_req_t *req)
     httpd_resp_send(req, body, (ssize_t)off);
 
     free(body);
+    free(recs);
     return ESP_OK;
 }
 
@@ -826,6 +833,10 @@ void web_server_start(void)
     cfg.send_wait_timeout    = 10;
     cfg.max_uri_handlers     = 18;   /* room for portal routes + /api/tune */
     cfg.uri_match_fn         = httpd_uri_match_wildcard;
+    /* Default httpd task stack is 4 KB.  Even with our heap-allocating
+     * handlers, leaving a comfortable margin avoids tripping the canary
+     * inside snprintf / vsnprintf, which can pull in ~1 KB of locals. */
+    cfg.stack_size           = 8192;
 
     if (httpd_start(&s_server, &cfg) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start HTTP server");
@@ -837,7 +848,7 @@ void web_server_start(void)
         .uri = "/app", .method = HTTP_GET, .handler = handle_app
     };
     static const httpd_uri_t history_uri = {
-        .uri = "/history", .method = HTTP_GET, .handler = handle_history
+        .uri = "/offset", .method = HTTP_GET, .handler = handle_history
     };
     static const httpd_uri_t history_json_uri = {
         .uri = "/api/history", .method = HTTP_GET, .handler = handle_history_json
@@ -887,5 +898,5 @@ void web_server_start(void)
     httpd_register_uri_handler(server, &ota_check_uri);
     httpd_register_uri_handler(server, &ota_apply_uri);
 
-    ESP_LOGI(TAG, "Web server started — /app  /history  /ota  /update");
+    ESP_LOGI(TAG, "Web server started — /app  /offset  /ota  /update");
 }

@@ -6,8 +6,10 @@
  * web_server — persistent HTTP server (port 80).
  *
  * Routes:
- *   GET  /history        → grind history page
+ *   GET  /offset         → tuning panel + grind history page
  *   GET  /api/history    → history data as JSON
+ *   GET  /api/tune       → current offset / autotune / motor latency
+ *   POST /api/tune       → update offset / autotune / motor latency
  *   GET  /ota            → firmware upload page
  *   POST /update         → OTA firmware upload
  *
