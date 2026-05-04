@@ -261,33 +261,62 @@ static const char HIST_TAIL[] =
 
 /* ── History handlers ─────────────────────────────────────────── */
 
+/* Per-record JSON: about 110 bytes worst case (timestamp 10, ms 5, fields).
+ * 128 gives ~16 % headroom; HISTORY_MAX × 128 = 6400 bytes for the array. */
+#define HIST_RECORD_MAX_LEN 128
+#define HIST_RECORDS_BUF_SIZE (HISTORY_MAX * HIST_RECORD_MAX_LEN + 32)
+
+/* Format the records array as "[{...},{...},...]" into out.
+ * Returns bytes written (excluding trailing NUL).  Caller owns out. */
+static size_t format_records_array(char *out, size_t cap,
+                                   const grind_record_t *recs, int n)
+{
+    size_t off = 0;
+    if (off < cap) out[off++] = '[';
+    for (int i = 0; i < n && off < cap; i++) {
+        int written = snprintf(out + off, cap - off,
+            "%s{\"t\":%.1f,\"r\":%.1f,\"wc\":%.2f,\"wp\":%.2f"
+            ",\"f\":%.2f,\"o\":%.2f,\"ms\":%u,\"p\":%u,\"ts\":%lu}",
+            i ? "," : "",
+            recs[i].target_g, recs[i].result_g,
+            recs[i].weight_at_cutoff_g, recs[i].weight_before_pulses_g,
+            recs[i].flow_g_s, recs[i].offset_g,
+            (unsigned)recs[i].grind_ms, (unsigned)recs[i].pulse_count,
+            (unsigned long)recs[i].timestamp);
+        if (written < 0 || (size_t)written >= cap - off) break;
+        off += (size_t)written;
+    }
+    if (off < cap) out[off++] = ']';
+    if (off < cap) out[off]   = '\0';
+    return off;
+}
+
 static esp_err_t handle_history(httpd_req_t *req)
 {
     grind_record_t recs[HISTORY_MAX];
     int n = grind_history_get(recs, HISTORY_MAX);
 
+    /*
+     * One TCP write per `httpd_resp_send_chunk` call: previously we sent
+     * 50+ chunks (1 for "[", 1 per record, 1 for "]", plus head and tail).
+     * On a marginal WiFi link the cumulative round-trip cost timed out the
+     * page.  Build the records array into a single heap buffer and send
+     * it as one chunk — total comes down to 3 chunks (head, array, tail).
+     */
+    char *body = malloc(HIST_RECORDS_BUF_SIZE);
+    if (!body) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return ESP_FAIL;
+    }
+    size_t body_len = format_records_array(body, HIST_RECORDS_BUF_SIZE, recs, n);
+
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_send_chunk(req, HIST_HEAD, HTTPD_RESP_USE_STRLEN);
-
-    /* Inject shots array as JS literal */
-    httpd_resp_send_chunk(req, "[", 1);
-    char buf[128];
-    for (int i = 0; i < n; i++) {
-        snprintf(buf, sizeof(buf),
-                 "%s{\"t\":%.1f,\"r\":%.1f,\"wc\":%.2f,\"wp\":%.2f"
-                 ",\"f\":%.2f,\"o\":%.2f,\"ms\":%u,\"p\":%u,\"ts\":%lu}",
-                 i ? "," : "",
-                 recs[i].target_g, recs[i].result_g,
-                 recs[i].weight_at_cutoff_g, recs[i].weight_before_pulses_g,
-                 recs[i].flow_g_s, recs[i].offset_g,
-                 (unsigned)recs[i].grind_ms, (unsigned)recs[i].pulse_count,
-                 (unsigned long)recs[i].timestamp);
-        httpd_resp_send_chunk(req, buf, HTTPD_RESP_USE_STRLEN);
-    }
-    httpd_resp_send_chunk(req, "]", 1);
-
+    httpd_resp_send_chunk(req, body, body_len);
     httpd_resp_send_chunk(req, HIST_TAIL, HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, NULL, 0);
+
+    free(body);
     return ESP_OK;
 }
 
@@ -334,24 +363,24 @@ static esp_err_t handle_history_json(httpd_req_t *req)
     grind_record_t recs[HISTORY_MAX];
     int n = grind_history_get(recs, HISTORY_MAX);
 
+    /* Same chunking-overhead concern as handle_history; build the entire
+     * JSON body in one buffer and send it as a single response. */
+    size_t cap = HIST_RECORDS_BUF_SIZE + 16; /* +space for {"shots":...} wrap */
+    char *body = malloc(cap);
+    if (!body) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return ESP_FAIL;
+    }
+    size_t off = (size_t)snprintf(body, cap, "{\"shots\":");
+    off += format_records_array(body + off, cap - off, recs, n);
+    if (off < cap) body[off++] = '}';
+    if (off < cap) body[off]   = '\0';
+
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    httpd_resp_send_chunk(req, "{\"shots\":[", HTTPD_RESP_USE_STRLEN);
-    char buf[128];
-    for (int i = 0; i < n; i++) {
-        snprintf(buf, sizeof(buf),
-                 "%s{\"t\":%.1f,\"r\":%.1f,\"wc\":%.2f,\"wp\":%.2f"
-                 ",\"f\":%.2f,\"o\":%.2f,\"ms\":%u,\"p\":%u,\"ts\":%lu}",
-                 i ? "," : "",
-                 recs[i].target_g, recs[i].result_g,
-                 recs[i].weight_at_cutoff_g, recs[i].weight_before_pulses_g,
-                 recs[i].flow_g_s, recs[i].offset_g,
-                 (unsigned)recs[i].grind_ms, (unsigned)recs[i].pulse_count,
-                 (unsigned long)recs[i].timestamp);
-        httpd_resp_send_chunk(req, buf, HTTPD_RESP_USE_STRLEN);
-    }
-    httpd_resp_send_chunk(req, "]}", HTTPD_RESP_USE_STRLEN);
-    httpd_resp_send_chunk(req, NULL, 0);
+    httpd_resp_send(req, body, (ssize_t)off);
+
+    free(body);
     return ESP_OK;
 }
 
