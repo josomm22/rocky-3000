@@ -570,12 +570,19 @@ static void settle_complete(void)
      * drops to 0 while the scale coasts, so we must use the saved value. */
     float flow = s_pulse_flow_rate;
 
-    if (shortfall > PULSE_MIN_G && s_pulse_attempts < PULSE_MAX_ATTEMPTS && flow > 0.01f)
+    /* Coast contribution after a pulse: the motor coasts for roughly motor_latency_ms
+     * after the SSR cuts, delivering additional coffee not in the productive window.
+     * If the coast alone already covers the target shortfall, any pulse overshoots. */
+    float coast_g = (s_motor_latency_ms / 1000.0f) * flow;
+    bool coast_overshoots = (shortfall * PULSE_FACTOR <= coast_g);
+
+    if (!coast_overshoots && shortfall > PULSE_MIN_G && s_pulse_attempts < PULSE_MAX_ATTEMPTS && flow > 0.01f)
     {
-        /* pulse = motor startup time + productive grinding time × undershoot factor */
-        float productive_ms = (shortfall / flow) * 1000.0f * PULSE_FACTOR;
-        float pulse_ms = s_motor_latency_ms + productive_ms;
-        pulse_ms = clampf(pulse_ms, (float)PULSE_MIN_MS, (float)PULSE_MAX_MS);
+        /* Subtract what the post-pulse coast will deliver so we don't double-count
+         * motor_latency_ms (previously it was added as "startup time" but the coast
+         * at the end was not subtracted, causing overshoot on small shortfalls). */
+        float productive_ms = ((shortfall * PULSE_FACTOR - coast_g) / flow) * 1000.0f;
+        float pulse_ms = clampf(productive_ms, (float)PULSE_MIN_MS, (float)PULSE_MAX_MS);
 
         s_state = GRIND_PULSING;
         ssr_set(1);

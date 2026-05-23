@@ -34,7 +34,7 @@
 #define AUTOTUNE_DEADBAND        0.1f
 #define OFFSET_MIN_G            -2.0f
 #define OFFSET_MAX_G             2.0f
-#define PULSE_MIN_G              0.15f
+#define PULSE_MIN_G              0.05f
 #define PULSE_MAX_ATTEMPTS       3
 #define PULSE_MIN_MS             30
 #define PULSE_MAX_MS             500
@@ -85,23 +85,26 @@ static void sim_autotune(sim_t *s)
  * Decide: fire a correction pulse or declare DONE.
  * Mirrors settle_complete() in grind_controller.c.
  *
- * A pulse of pulse_ms adds weight analytically:
- *   weight_added = flow_rate * (pulse_ms / 1000)
- *                = flow_rate * (shortfall / flow_rate) * PULSE_FACTOR
- *                = shortfall * PULSE_FACTOR
- * This matches the demo-mode weight ramp exactly.
+ * A pulse fires only when the post-pulse coast (motor_latency_ms * flow_rate)
+ * would not by itself overshoot the remaining shortfall.  Net weight added
+ * per pulse = shortfall * PULSE_FACTOR (productive grinding + coast).
  */
 static void sim_settle_complete(sim_t *s)
 {
     float shortfall = s->target - s->weight;
+    float flow      = s->flow_rate_g_s;
+    float coast_g   = (flow > 0.01f)
+                      ? (s->motor_latency_ms / 1000.0f) * flow
+                      : 0.0f;
+    bool coast_overshoots = (shortfall * PULSE_FACTOR <= coast_g);
 
-    if (shortfall > PULSE_MIN_G
+    if (!coast_overshoots
+        && shortfall > PULSE_MIN_G
         && s->pulse_attempts < PULSE_MAX_ATTEMPTS
-        && s->flow_rate_g_s > 0.01f)
+        && flow > 0.01f)
     {
-        float pulse_ms = (shortfall / s->flow_rate_g_s) * 1000.0f * PULSE_FACTOR;
-        pulse_ms = clampf(pulse_ms, (float)PULSE_MIN_MS, (float)PULSE_MAX_MS);
-        s->weight      += s->flow_rate_g_s * (pulse_ms / 1000.0f);
+        /* Net weight added = productive grinding + coast = shortfall * PULSE_FACTOR */
+        s->weight += shortfall * PULSE_FACTOR;
         s->pulse_attempts++;
         s->pulse_count++;
         s->settle_ticks = SETTLE_TICKS;
@@ -262,26 +265,26 @@ void test_no_pulse_on_default_offset(void)
 
 /*
  * A large positive offset makes the SSR cut off too early, leaving an
- * undershoot bigger than PULSE_MIN_G.  The correction pulse must fire.
+ * undershoot big enough that the coast alone cannot cover it.
  *
- * With offset=0.5 the settled weight is target - 0.5 + 0.18 = 17.68 g
- * (shortfall 0.32 g > PULSE_MIN_G 0.15 g).
+ * With offset=0.6, motor_lat=100ms, flow=3g/s: coast_g=0.3g.
+ * Settled weight = 17.58g, shortfall=0.42g.
+ * coast_overshoots = (0.336 <= 0.3) = false → pulse fires.
  */
 void test_pulse_fires_on_aggressive_offset(void)
 {
-    g.offset = 0.5f;
+    g.offset = 0.6f;
     sim_start(&g, 18.0f);
     sim_run(&g, MAX_TICKS);
     TEST_ASSERT_GREATER_THAN_FLOAT(0.0f, (float)g.pulse_count);
 }
 
 /*
- * Even when a pulse fires, the final result must be within 0.5 g of
- * target (the pulse recovers most of the shortfall in one burst).
+ * Even when a pulse fires, the final result must be within 0.5 g of target.
  */
 void test_pulse_improves_accuracy(void)
 {
-    g.offset = 0.5f;
+    g.offset = 0.6f;
     sim_start(&g, 18.0f);
     sim_run(&g, MAX_TICKS);
     TEST_ASSERT_FLOAT_WITHIN(0.5f, 18.0f, g.result);
@@ -414,6 +417,23 @@ void test_higher_latency_cuts_off_earlier(void)
     TEST_ASSERT_LESS_THAN_FLOAT(ssr_short, ssr_long);
 }
 
+/*
+ * Regression: after a first pulse narrows the gap, a second pulse must NOT
+ * fire when the post-pulse coast alone would exceed the remaining shortfall.
+ *
+ * With offset=0.6, motor_lat=100ms, flow=3g/s:
+ *   settled=17.58g, shortfall=0.42g → pulse 1 fires (0.336 > coast_g=0.3)
+ *   after pulse 1: weight=17.916g, shortfall=0.084g
+ *   coast_overshoots=(0.0672 <= 0.3)=true → pulse 2 skipped.
+ */
+void test_second_pulse_skipped_when_coast_covers_shortfall(void)
+{
+    g.offset = 0.6f;
+    sim_start(&g, 18.0f);
+    sim_run(&g, MAX_TICKS);
+    TEST_ASSERT_EQUAL_INT(1, g.pulse_count);
+}
+
 /* ── Runner ─────────────────────────────────────────────────── */
 
 int main(void)
@@ -436,6 +456,7 @@ int main(void)
     RUN_TEST(test_higher_flow_cuts_off_earlier);
     RUN_TEST(test_result_is_positive);
     RUN_TEST(test_higher_latency_cuts_off_earlier);
+    RUN_TEST(test_second_pulse_skipped_when_coast_covers_shortfall);
 
     return UNITY_END();
 }
