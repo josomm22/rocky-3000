@@ -84,15 +84,7 @@ jobs:
         run: python scripts/embed_web.py
 
       - name: Generate secrets.h
-        env:
-          WIFI_SSID: ${{ secrets.WIFI_SSID }}
-          WIFI_PASSWORD: ${{ secrets.WIFI_PASSWORD }}
-        run: |
-          cat > src/secrets.h << EOF
-          #pragma once
-          #define DEFAULT_WIFI_SSID     "${WIFI_SSID}"
-          #define DEFAULT_WIFI_PASSWORD "${WIFI_PASSWORD}"
-          EOF
+        run: cp src/secrets.h.example src/secrets.h
 
       - name: Build firmware
         run: pio run -e waveshare_28b
