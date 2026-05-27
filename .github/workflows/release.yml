@@ -83,9 +83,6 @@ jobs:
       - name: Embed web bundle into C header
         run: python scripts/embed_web.py
 
-      - name: Generate secrets.h
-        run: cp src/secrets.h.example src/secrets.h
-
       - name: Build firmware
         run: pio run -e waveshare_28b
 
