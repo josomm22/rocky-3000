@@ -14,12 +14,14 @@
  *   most recent reading, not every sample).
  *
  *   The LVGL poll timer (UI_POLL_MS = 100 ms, ~10 Hz) wakes up, snapshots
- *   s_latest_weight, checks the stop threshold, and updates the display.
- *   The two rates are intentionally independent:
- *     - 80 Hz  → smooth threshold detection, low latency SSR cut-off
- *     - 10 Hz  → fast enough display refresh, doesn't flood the LVGL task
+ *   s_latest_weight, drives the state machine, and updates the display.
+ *   The SSR cut-off itself does NOT wait for this timer: hx711_task compares
+ *   every fresh sample against the precomputed stop threshold and de-energises
+ *   the SSR within CUTOFF_CONFIRM_SAMPLES samples (~37 ms) of the crossing.
+ *   The LVGL timer only observes the result (s_cutoff_pending), so display
+ *   rendering stalls can no longer add jitter to the cut-off instant.
  *
- *   SSR driven on GPIO_NUM_33 (active HIGH, matches DESIGN.md §3.4).
+ *   SSR driven on GPIO_NUM_4 (active HIGH).
  */
 
 #include "grind_controller.h"
@@ -82,9 +84,9 @@ static void load_settings(void);
 #define MAX_PLAUSIBLE_FLOW_G_S 15.0f
 
 /* Hard ceiling on the predicted coast distance applied during the grind.
- * coast_g = (motor_latency + meas_latency) × flow × COAST_RATIO can balloon
- * if flow rate spikes past the spike gate; this cap stops a corrupt flow
- * value from making stop_at deeply negative and cutting the shot at <1 s. */
+ * coast_g = motor_latency × flow × COAST_RATIO can balloon if flow rate
+ * spikes past the spike gate; this cap stops a corrupt flow value from
+ * making stop_at deeply negative and cutting the shot at <1 s. */
 #define MAX_COAST_G 3.0f
 
 /* Motor-latency autotune: EMA factor applied to each shot's observed coast.
@@ -93,10 +95,36 @@ static void load_settings(void);
 
 /* Dynamic coast prediction: stop_at = target - coast_g - s_offset
  *   coast_g = (motor_latency_ms / 1000) × flow_rate_g_s × COAST_RATIO
- * Falls back to COAST_FALLBACK_G when flow rate is not yet available. */
+ * Falls back to COAST_FALLBACK_G when flow rate is not yet available.
+ * motor_latency_ms is auto-tuned from the observed coast each shot, so it
+ * absorbs every fixed delay in the loop (motor spin-down, cutoff
+ * confirmation window) without those being modelled separately. */
 #define MOTOR_LATENCY_MS_DEFAULT 250.0f /* coffee grinder motors coast 200-400ms; tune via settings */
 #define COAST_RATIO 1.0f
 #define COAST_FALLBACK_G 0.3f /* used when flow rate == 0 */
+
+/* Flow-rate EMA: smooths the per-block weight delta before it feeds coast
+ * prediction, pulse sizing and motor-latency autotune.  Raw block deltas
+ * amplify scale noise (a few hundredths of a gram per block becomes
+ * ±0.2–0.4 g/s); α=0.3 roughly halves that while still tracking a real
+ * flow change within ~3 blocks (300 ms). */
+#define FLOW_EMA_ALPHA 0.3f
+
+/* SSR cutoff confirmation: this many consecutive 80 Hz samples must sit at
+ * or above the stop threshold before hx711_task cuts the SSR.  Rejects
+ * single-sample EMI spikes while keeping the reaction latency deterministic
+ * (~37 ms) instead of the 0–100 ms+ jitter of the LVGL poll timer. */
+#define CUTOFF_CONFIRM_SAMPLES 3
+
+/* Assumed flow when a pulse must fire but flow was never measured (tiny
+ * targets can push stop_at ≤ 0, cutting the SSR before any coffee flows).
+ * A typical espresso mid-grind rate; PULSE_FACTOR still undershoots, and
+ * pulse_done_cb adopts the real observed rate after the first pulse. */
+#define PULSE_FALLBACK_FLOW_G_S 3.0f
+
+/* Runaway guard: hard ceiling on SSR-on time for a single grind.  Covers
+ * sensor death mid-grind (weight stops rising) and empty-hopper runs. */
+#define MAX_GRIND_MS 60000
 
 /* Pulse refinement: short correction bursts after the main stop */
 #define PULSE_MIN_G 0.05f    /* below this shortfall → skip pulse      */
@@ -108,10 +136,17 @@ static void load_settings(void);
 /* UI display refresh via LVGL timer (does NOT affect HX711 sample rate) */
 #define UI_POLL_MS 100
 
-/* Declared here so hx711_task (real mode) can read it before the rest of
- * the module state block. */
+/* Declared here so hx711_task (real mode) can read them before the rest of
+ * the module state block.  target/offset/motor-latency are written by the
+ * LVGL thread (Core 1) before the cutoff is armed and read per-block by
+ * hx711_task (Core 0); single-float accesses are atomic on ESP32. */
 static volatile float s_cal_factor = 0.000386f; /* ~20 g / 176 displayed; tune via calibration screen */
 static volatile bool s_tare_requested = false;
+static volatile float s_target = 18.0f;
+static volatile float s_offset = DEFAULT_OFFSET_G; /* residual bias, auto-tuned */
+static volatile float s_motor_latency_ms = MOTOR_LATENCY_MS_DEFAULT;
+
+static void ssr_set(int on);
 
 #if GRIND_DEMO_MODE
 /* Simulated grind speed — realistic espresso dose in ~6 s */
@@ -163,13 +198,13 @@ static volatile bool s_settle_buf_full = false;
 #define HX711_HEALTH_TIMEOUT_MS 2000 /* stale after 2 s without a fresh block  */
 #define HX711_MAX_RETRIES 3          /* power-cycle attempts before giving up  */
 
-/* EMA on top of the block average: α=0.5 → one block period (~200 ms)
- * to settle; the 16-sample block average already handles noise. */
+/* EMA on top of the block average.  α=1.0 disables it — the 8-sample block
+ * average already handles white noise; kept as a tuning hook. */
 #define HX711_EMA_ALPHA 1.0f
 
 /* Reject a block whose trimmed average deviates more than this from the
  * previous reading — catches motor-start EMI spikes without adding latency.
- * A 10 g/s grinder at max can add ~2 g per 200 ms block; 10 g is 5× margin. */
+ * A 10 g/s grinder at max adds ~1 g per 100 ms block; 10 g is 10× margin. */
 #define SPIKE_REJECT_DELTA_G 10.0f
 
 /* Health tracking: timestamp of last successful block read.
@@ -185,6 +220,20 @@ static volatile bool s_tare_complete = false;
  * gate so placing a heavy calibration weight produces an immediate reading.
  * Set via grind_ctrl_set_calibration_mode() from the calibration screen. */
 static volatile bool s_calibration_mode = false;
+
+/* Previous block average for flow-rate calculation; file-scope so the tare
+ * branch can reset it (pre-tare history is meaningless against a new zero). */
+static volatile float s_prev_block_weight = 0.0f;
+
+/* Fast SSR cutoff — armed by tare_done_cb (Core 1), fired by hx711_task
+ * (Core 0).  The task compares every fresh sample against s_stop_at_g and
+ * cuts the SSR itself; poll_cb only picks up s_cutoff_pending to advance
+ * the state machine, so its latency no longer affects the dose. */
+static volatile bool  s_cutoff_armed   = false;
+static volatile bool  s_cutoff_pending = false;
+static volatile float s_cutoff_weight  = 0.0f; /* sample that confirmed cutoff */
+static volatile float s_cutoff_flow    = 0.0f; /* smoothed flow at cutoff      */
+static volatile float s_stop_at_g      = 0.0f; /* refreshed each block         */
 
 static void hx711_task(void *arg)
 {
@@ -218,14 +267,22 @@ static void hx711_task(void *arg)
             /* If tare failed, s_tare_complete stays false — tare_done_cb
              * will not transition to GRIND_RUNNING. */
             s_tare_requested = false;
+
+            /* Flow and settle state reference the old zero — reset them. */
+            s_prev_block_weight = 0.0f;
+            s_flow_rate_g_s = 0.0f;
+            s_settle_buf_full = false;
+            s_settle_buf_idx = 0;
         }
 
         /* Collect HX711_AVG_SAMPLES readings, blocking on each conversion
          * with a timeout.  If any sample times out, attempt recovery. */
         float sum = 0.0f;
         float max_g = -1e9f;
+        float min_g = 1e9f;
         int n = 0;
         bool block_ok = true;
+        static int cutoff_confirm = 0;
         for (int i = 0; i < HX711_AVG_SAMPLES; i++)
         {
             if (!hx711_wait_ready(HX711_READY_TIMEOUT_MS))
@@ -238,7 +295,32 @@ static void hx711_task(void *arg)
                 sum += g;
                 if (g > max_g)
                     max_g = g;
+                if (g < min_g)
+                    min_g = g;
                 n++;
+
+                /* Fast cutoff: compare every fresh sample against the stop
+                 * threshold.  CUTOFF_CONFIRM_SAMPLES consecutive samples
+                 * must agree so one EMI spike can't end the shot early. */
+                if (s_cutoff_armed)
+                {
+                    if (g >= s_stop_at_g)
+                    {
+                        if (++cutoff_confirm >= CUTOFF_CONFIRM_SAMPLES)
+                        {
+                            ssr_set(0);
+                            s_cutoff_weight  = g;
+                            s_cutoff_flow    = s_flow_rate_g_s;
+                            s_cutoff_armed   = false;
+                            s_cutoff_pending = true;
+                            cutoff_confirm   = 0;
+                        }
+                    }
+                    else
+                        cutoff_confirm = 0;
+                }
+                else
+                    cutoff_confirm = 0;
             }
         }
 
@@ -264,11 +346,13 @@ static void hx711_task(void *arg)
             continue; /* restart the main loop */
         }
 
-        if (n > 1)
+        if (n > 2)
         {
-            /* Layer 1: trimmed mean — drop the single highest sample to
-             * remove within-block outliers caused by EMI bursts. */
-            float avg = (sum - max_g) / (float)(n - 1);
+            /* Layer 1: symmetric trimmed mean — drop the highest AND lowest
+             * sample to remove within-block outliers from EMI bursts, which
+             * spike in both directions (motor start can pull readings
+             * negative just as easily as positive). */
+            float avg = (sum - max_g - min_g) / (float)(n - 2);
 
             /* Layer 2: inter-block delta gate — reject the entire block if
              * the jump is physically impossible (spike from motor start etc.)
@@ -285,14 +369,17 @@ static void hx711_task(void *arg)
                  * Hard-capped at MAX_PLAUSIBLE_FLOW_G_S so a single block that
                  * sneaks past the spike gate (e.g. a 9 g jump just under the
                  * 10 g threshold) can't blow up coast_g and cut the shot at
-                 * <1 s.  Real espresso grinders peak around 5–10 g/s. */
-                static float prev_block_weight = 0.0f;
+                 * <1 s.  Real espresso grinders peak around 5–10 g/s.
+                 * The EMA then smooths the clamped rate: raw block deltas
+                 * jitter by ±0.2–0.4 g/s, which used to wobble stop_at every
+                 * block and bias the cutoff early. */
                 float dt_s = (float)HX711_AVG_SAMPLES / (float)HX711_POLL_HZ;
-                float rate = (avg - prev_block_weight) / dt_s;
+                float rate = (avg - s_prev_block_weight) / dt_s;
                 if (rate < 0.0f) rate = 0.0f;
                 if (rate > MAX_PLAUSIBLE_FLOW_G_S) rate = MAX_PLAUSIBLE_FLOW_G_S;
-                s_flow_rate_g_s = rate;
-                prev_block_weight = avg;
+                s_flow_rate_g_s = FLOW_EMA_ALPHA * rate
+                                + (1.0f - FLOW_EMA_ALPHA) * (float)s_flow_rate_g_s;
+                s_prev_block_weight = avg;
 
                 /* Settling detection buffer: push latest block average. */
                 s_settle_buf[s_settle_buf_idx] = s_latest_weight;
@@ -301,6 +388,20 @@ static void hx711_task(void *arg)
                 {
                     s_settle_buf_idx = 0;
                     s_settle_buf_full = true;
+                }
+
+                /* Refresh the stop threshold for the fast cutoff path.
+                 * coast_g = motor_latency × flow; motor latency is autotuned
+                 * from the observed coast each shot, so it also absorbs the
+                 * cutoff confirmation window — nothing else to model here. */
+                if (s_cutoff_armed)
+                {
+                    float flow = (float)s_flow_rate_g_s;
+                    float coast_g = (flow > 0.01f)
+                                        ? (s_motor_latency_ms / 1000.0f) * flow * COAST_RATIO
+                                        : COAST_FALLBACK_G;
+                    if (coast_g > MAX_COAST_G) coast_g = MAX_COAST_G;
+                    s_stop_at_g = s_target - coast_g - s_offset;
                 }
             }
             /* else: spike detected — keep previous weight and flow rate */
@@ -341,9 +442,6 @@ static bool is_settled(void)
 /* ── Module state ───────────────────────────────────────────── */
 
 static grind_state_t s_state = GRIND_IDLE;
-static float s_target = 18.0f;
-static float s_offset = DEFAULT_OFFSET_G; /* residual bias, auto-tuned */
-static float s_motor_latency_ms = MOTOR_LATENCY_MS_DEFAULT;
 static bool  s_autotune_enabled = true;   /* user-toggle; persisted to NVS */
 static bool  s_manual_stop = false;       /* set by grind_ctrl_stop, cleared each start */
 static float s_weight = 0.0f;
@@ -483,27 +581,34 @@ static void run_autotune(void)
         return;
 
 #if !GRIND_DEMO_MODE
-    /* Motor-latency autotune: derive the real total latency from the
-     * observed coast, subtract the known measurement latency, and EMA
-     * the motor component.  This makes the coast prediction self-correcting
-     * so the user doesn't have to tune motor_latency_ms by hand. */
+    /* Motor-latency autotune: derive the loop latency from the observed
+     * coast and EMA it.  The cutoff is per-sample now, so there is no
+     * measurement staleness to subtract — coast/flow IS the latency the
+     * stop threshold must compensate (motor spin-down + confirmation
+     * window).  This keeps the coast prediction self-correcting so the
+     * user doesn't have to tune motor_latency_ms by hand. */
     float actual_coast_g = s_weight_before_pulses - s_weight_at_cutoff;
     if (actual_coast_g > 0.02f) {
-        float meas_latency_ms   = (HX711_AVG_SAMPLES * 1000.0f / HX711_POLL_HZ) * 0.5f;
-        float total_latency_ms  = (actual_coast_g / s_pulse_flow_rate) * 1000.0f;
-        float observed_motor_ms = total_latency_ms - meas_latency_ms;
+        float observed_ms = (actual_coast_g / s_pulse_flow_rate) * 1000.0f;
         s_motor_latency_ms = clampf(
             (1.0f - MOTOR_LATENCY_ALPHA) * s_motor_latency_ms +
-            MOTOR_LATENCY_ALPHA * observed_motor_ms,
+            MOTOR_LATENCY_ALPHA * observed_ms,
             10.0f, 500.0f);
     }
 #endif
 
-    /* Pre-stop offset autotune — capped per shot so the offset cannot swing
-     * to the clamp floor in a single step.  Once dialled in, even a noisy
-     * outlier nudges by at most AUTOTUNE_MAX_STEP_G. */
-    if (abs_delta > AUTOTUNE_DEADBAND) {
-        float step = (s_result - s_target) * AUTOTUNE_FACTOR;
+    /* Pre-stop offset autotune — tuned from the MAIN-STOP error (settled
+     * weight before any pulse), not the final result.  Pulses pull the
+     * final weight back to target, so tuning on s_result would let a
+     * persistent main-stop undershoot hide inside the deadband forever,
+     * paying the multi-second pulse penalty on every shot.  Converging the
+     * main stop itself makes pulses the exception, not the routine.
+     * Capped per shot so the offset cannot swing to the clamp floor in a
+     * single step — even a noisy outlier nudges by at most
+     * AUTOTUNE_MAX_STEP_G. */
+    float main_delta = s_weight_before_pulses - s_target;
+    if (fabsf(main_delta) > AUTOTUNE_DEADBAND) {
+        float step = main_delta * AUTOTUNE_FACTOR;
         if (step >  AUTOTUNE_MAX_STEP_G) step =  AUTOTUNE_MAX_STEP_G;
         if (step < -AUTOTUNE_MAX_STEP_G) step = -AUTOTUNE_MAX_STEP_G;
         s_offset = clampf(s_offset + step, OFFSET_MIN_G, OFFSET_MAX_G);
@@ -543,6 +648,12 @@ static void pulse_done_cb(lv_timer_t *t)
     s_pulse_attempts++;
     s_settle_ticks = 0; /* count-up; will wait for is_settled() or timeout */
 #if !GRIND_DEMO_MODE
+    /* If flow was never measured during the main grind (cutoff fired before
+     * any coffee flowed), adopt the rate the pulse just produced so the next
+     * pulse is sized from real data instead of the fallback assumption. */
+    if (s_pulse_flow_rate <= 0.01f)
+        s_pulse_flow_rate = (float)s_flow_rate_g_s;
+
     /* Invalidate the settle buffer so is_settled() must wait for a full
      * fresh window of post-pulse readings before it can fire again.
      * Without this, stale in-pulse data causes the next pulse to start
@@ -570,8 +681,15 @@ static void settle_complete(void)
      * drops to 0 while the scale coasts, so we must use the saved value. */
     float flow = s_pulse_flow_rate;
 
-    if (shortfall > PULSE_MIN_G && s_pulse_attempts < PULSE_MAX_ATTEMPTS && flow > 0.01f)
+    if (shortfall > PULSE_MIN_G && s_pulse_attempts < PULSE_MAX_ATTEMPTS)
     {
+        /* Flow can be unmeasured when the cutoff fired before any coffee
+         * flowed (tiny targets push stop_at ≤ 0).  Assume a typical rate so
+         * the shot is still dosed up by pulses instead of ending at ~0 g;
+         * pulse_done_cb adopts the real observed rate after each pulse. */
+        if (flow <= 0.01f)
+            flow = PULSE_FALLBACK_FLOW_G_S;
+
         /* pulse = motor startup time + productive grinding time × undershoot factor */
         float productive_ms = (shortfall / flow) * 1000.0f * PULSE_FACTOR;
         float pulse_ms = s_motor_latency_ms + productive_ms;
@@ -593,8 +711,9 @@ static void settle_complete(void)
 /* ── LVGL poll timer (UI_POLL_MS, ~10 Hz) ───────────────────── */
 /*
  * In real mode: snapshots s_latest_weight (kept current by the 80 Hz
- * hx711_task).  The stop / settle / pulse decisions run here at ~10 Hz —
- * adequate for espresso doses.
+ * hx711_task) and advances the state machine.  Settle / pulse decisions run
+ * here at ~10 Hz — adequate, since the SSR is already off by then.  The
+ * cut-off itself fires per-sample in hx711_task (see s_cutoff_pending).
  */
 static void poll_cb(lv_timer_t *t)
 {
@@ -657,28 +776,18 @@ static void poll_cb(lv_timer_t *t)
     if (s_weight < 0.0f) s_weight = 0.0f;
 #endif
 
-    /* Dynamic stop threshold: coast_g = (motor_latency + measurement_latency) × flow × ratio.
-     * Measurement latency ≈ half the block period (avg staleness of s_latest_weight).
-     * Falls back to COAST_FALLBACK_G until flow rate is established.
-     * Hard-capped at MAX_COAST_G as a defence-in-depth: even with the flow-rate
-     * cap in hx711_task, a sudden motor_latency_ms drift could in principle
-     * push coast past target.  This guarantees the grinder runs at least until
-     * (target - MAX_COAST_G - offset) g of real coffee is on the scale. */
+#if GRIND_DEMO_MODE
+    /* Demo mode has no hx711_task, so the stop threshold is still evaluated
+     * here at 10 Hz.  Real mode cuts off per-sample in hx711_task. */
     float flow = (float)s_flow_rate_g_s;
-    float meas_latency_ms = (HX711_AVG_SAMPLES * 1000.0f / HX711_POLL_HZ) * 0.5f;
     float coast_g = (flow > 0.01f)
-                        ? ((s_motor_latency_ms + meas_latency_ms) / 1000.0f) * flow * COAST_RATIO
+                        ? (s_motor_latency_ms / 1000.0f) * flow * COAST_RATIO
                         : COAST_FALLBACK_G;
     if (coast_g > MAX_COAST_G) coast_g = MAX_COAST_G;
     float stop_at = s_target - coast_g - s_offset;
 
     if (s_weight >= stop_at)
     {
-#if !GRIND_DEMO_MODE
-        /* Capture flow rate NOW — it drops to 0 once the grinder coasts.
-         * This value drives pulse duration in settle_complete(). */
-        s_pulse_flow_rate = (float)s_flow_rate_g_s;
-#endif
         s_weight_at_cutoff = s_weight;
         s_grind_ms = lv_tick_get() - s_grind_start_ms;
         ssr_set(0);
@@ -686,14 +795,39 @@ static void poll_cb(lv_timer_t *t)
         s_settle_ticks = 0;
         s_state = GRIND_SETTLING;
 
-#if GRIND_DEMO_MODE
         /* Simulate mechanical overshoot so the settled weight is realistic */
         s_weight = stop_at + coast_g + DEMO_OVERSHOOT_G + lcg_noise() * 0.05f;
         s_pulse_flow_rate = DEMO_RAMP_G_PER_SEC;
         if (s_weight < 0.0f)
             s_weight = 0.0f;
-#endif
     }
+#else
+    /* The fast cutoff fired in hx711_task — advance the state machine.
+     * SSR is already off, so the timer latency here costs nothing. */
+    if (s_cutoff_pending)
+    {
+        s_cutoff_pending = false;
+        s_pulse_flow_rate  = s_cutoff_flow;
+        s_weight_at_cutoff = s_cutoff_weight;
+        s_grind_ms = lv_tick_get() - s_grind_start_ms;
+        s_pulse_attempts = 0;
+        s_settle_ticks = 0;
+        s_state = GRIND_SETTLING;
+        return;
+    }
+
+    /* Safety backstop: sensor died mid-grind or runaway duration — cut the
+     * SSR and end the shot.  Flagged as a manual stop so autotune skips it. */
+    if (!s_hx711_healthy ||
+        lv_tick_get() - s_grind_start_ms > MAX_GRIND_MS)
+    {
+        s_cutoff_armed = false;
+        ssr_set(0);
+        s_result = s_weight;
+        s_manual_stop = true;
+        s_state = GRIND_DONE;
+    }
+#endif
 }
 
 /* ── Tare-settle callback ────────────────────────────────────── */
@@ -730,6 +864,16 @@ static void tare_done_cb(lv_timer_t *t)
 
     s_state = GRIND_RUNNING;
     ssr_set(1);
+#if !GRIND_DEMO_MODE
+    /* Arm the fast cutoff AFTER the SSR is energised, so a fire can never be
+     * undone by the ssr_set(1) above.  The initial threshold uses the
+     * fallback coast; hx711_task refreshes it every block once flow data
+     * exists.  For tiny targets this can be ≤ 0 — the cutoff then fires
+     * almost immediately and the pulse path doses the shot up instead. */
+    s_stop_at_g = s_target - COAST_FALLBACK_G - s_offset;
+    s_cutoff_pending = false;
+    s_cutoff_armed = true;
+#endif
     s_grind_start_ms = lv_tick_get();
 }
 
@@ -768,7 +912,9 @@ void grind_ctrl_init(void)
 
 void grind_ctrl_start(float target_g)
 {
-    if (s_state == GRIND_RUNNING || s_state == GRIND_TARING)
+    /* Only from rest: starting during SETTLING/PULSING would orphan the
+     * pulse timer and corrupt the in-flight shot's bookkeeping. */
+    if (s_state != GRIND_IDLE && s_state != GRIND_DONE)
         return;
 
 #if !GRIND_DEMO_MODE
@@ -789,6 +935,10 @@ void grind_ctrl_start(float target_g)
     s_grind_ms             = 0;
     s_tare_complete        = false;
     s_manual_stop          = false;
+#if !GRIND_DEMO_MODE
+    s_cutoff_armed         = false;
+    s_cutoff_pending       = false;
+#endif
     s_tare_start_ms        = lv_tick_get();
     s_state = GRIND_TARING;
 
@@ -820,6 +970,12 @@ void grind_ctrl_stop(void)
         s_pulse_timer = NULL;
     }
 
+#if !GRIND_DEMO_MODE
+    /* Disarm the fast cutoff so hx711_task stops evaluating the threshold. */
+    s_cutoff_armed   = false;
+    s_cutoff_pending = false;
+#endif
+
     /* Turn off SSR if it was on */
     if (s_state == GRIND_RUNNING || s_state == GRIND_PULSING)
         ssr_set(0);
@@ -845,7 +1001,9 @@ static void purge_stop_cb(lv_timer_t *t)
 
 void grind_ctrl_purge(void)
 {
-    if (s_state == GRIND_RUNNING || s_purging)
+    /* Only from a fully idle controller — energising the SSR while taring,
+     * settling or pulsing would corrupt an in-flight shot. */
+    if (s_state != GRIND_IDLE || s_purging)
         return;
 
     s_purging = true;
@@ -860,6 +1018,7 @@ bool grind_ctrl_is_purging(void) { return s_purging; }
 grind_state_t grind_ctrl_get_state(void) { return s_state; }
 float grind_ctrl_get_weight(void) { return s_weight; }
 float grind_ctrl_get_result(void) { return s_result; }
+float grind_ctrl_get_target(void) { return s_target; }
 float grind_ctrl_get_offset(void) { return s_offset; }
 
 void grind_ctrl_set_offset(float g)

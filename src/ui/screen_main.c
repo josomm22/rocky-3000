@@ -16,6 +16,7 @@
 #include "grind_controller.h"
 #include "grind_history.h"
 #include "ota_checker.h"
+#include "Buzzer.h"
 
 /* ── NVS namespace for presets ──────────────────────────────── */
 #define PRESET_NVS_NS "app_cfg"
@@ -51,6 +52,8 @@ static lv_obj_t   *s_btn_add      = NULL;
 static lv_obj_t   *s_sel_frame    = NULL;
 static lv_obj_t   *s_btn_grind    = NULL;
 static lv_obj_t   *s_lbl_grind    = NULL;
+static lv_obj_t   *s_arc_progress = NULL;
+static lv_obj_t   *s_lbl_status   = NULL;
 static lv_obj_t   *s_btn_stop     = NULL;
 static lv_obj_t   *s_lbl_purge    = NULL;
 static lv_obj_t   *s_lbl_wifi     = NULL;
@@ -62,6 +65,7 @@ static lv_timer_t *s_grind_poll      = NULL;
 static lv_timer_t *s_done_timer      = NULL;
 static lv_timer_t *s_toast_timer     = NULL;
 static lv_timer_t *s_update_poll     = NULL;
+static lv_timer_t *s_buzz_timer      = NULL;
 
 /* ── OTA update UI (banner + download overlay) ──────────────── */
 static lv_obj_t   *s_update_banner   = NULL;
@@ -78,8 +82,6 @@ static void position_sel_frame(int idx);
  * Toast
  * ═══════════════════════════════════════════════════════════════ */
 
-static void show_error_toast(const char *msg);  /* forward decl */
-
 static void toast_dismiss_cb(lv_timer_t *t)
 {
     (void)t;
@@ -90,7 +92,7 @@ static void toast_dismiss_cb(lv_timer_t *t)
     }
 }
 
-static void show_grind_toast(float result, float target)
+static void show_toast(const char *msg, lv_color_t bg)
 {
     if (!s_scr) return;
 
@@ -104,19 +106,11 @@ static void show_grind_toast(float result, float target)
         s_toast_cont = NULL;
     }
 
-    float delta    = result - target;
-    float new_off  = grind_ctrl_get_offset();
-
-    char buf[96];
-    snprintf(buf, sizeof(buf),
-             "Done  \xc2\xb7  %.1fg  (%+.1fg)\nOffset \xe2\x86\x92 %.2fg",
-             result, delta, new_off);
-
     lv_obj_t *cont = lv_obj_create(s_scr);
     lv_obj_set_width(cont, SCR_W - 40);
     lv_obj_set_height(cont, LV_SIZE_CONTENT);
     lv_obj_align(cont, LV_ALIGN_BOTTOM_MID, 0, -16);
-    lv_obj_set_style_bg_color(cont, COL_SUCCESS, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(cont, bg, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_opa(cont, LV_OPA_90, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_border_width(cont, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_radius(cont, 12, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -125,7 +119,7 @@ static void show_grind_toast(float result, float target)
     lv_obj_remove_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *lbl = lv_label_create(cont);
-    lv_label_set_text(lbl, buf);
+    lv_label_set_text(lbl, msg);
     lv_obj_set_style_text_color(lbl, lv_color_white(), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_font(lbl, &lv_font_montserrat_24, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_width(lbl, SCR_W - 40 - 28);
@@ -135,17 +129,42 @@ static void show_grind_toast(float result, float target)
     lv_timer_set_repeat_count(s_toast_timer, 1);
 }
 
+static void show_error_toast(const char *msg)
+{
+    show_toast(msg, COL_ERROR);
+}
+
+static void show_grind_toast(float result, float target)
+{
+    char buf[96];
+    snprintf(buf, sizeof(buf),
+             "Done  \xc2\xb7  %.1fg  (%+.1fg)\nOffset \xe2\x86\x92 %.2fg",
+             result, result - target, grind_ctrl_get_offset());
+    show_toast(buf, COL_SUCCESS);
+}
+
 /* ═══════════════════════════════════════════════════════════════
  * Grind cycle UI helpers
  * ═══════════════════════════════════════════════════════════════ */
 
+/* True while a grind cycle is actively using the grinder/scale — i.e. any
+ * state where navigating away or firing the SSR would corrupt the shot. */
+static bool grind_in_progress(void)
+{
+    grind_state_t st = grind_ctrl_get_state();
+    return st != GRIND_IDLE && st != GRIND_DONE;
+}
+
 static void set_grinding_ui(bool grinding)
 {
-    if (s_btn_stop) {
+    lv_obj_t *objs[] = { s_btn_stop, s_arc_progress, s_lbl_status };
+    for (size_t i = 0; i < sizeof(objs) / sizeof(objs[0]); i++) {
+        if (!objs[i])
+            continue;
         if (grinding)
-            lv_obj_remove_flag(s_btn_stop, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(objs[i], LV_OBJ_FLAG_HIDDEN);
         else
-            lv_obj_add_flag(s_btn_stop, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(objs[i], LV_OBJ_FLAG_HIDDEN);
     }
 }
 
@@ -159,11 +178,36 @@ static void done_reset_cb(lv_timer_t *t)
     set_grinding_ui(false);
 }
 
+static void buzz_off_cb(lv_timer_t *t)
+{
+    (void)t;
+    s_buzz_timer = NULL;  /* auto-deleted by LVGL */
+    Buzzer_Off();
+}
+
+/* Short completion beep — grinding is a walk-away activity. */
+static void beep_done(void)
+{
+    if (s_buzz_timer)
+        return;
+    Buzzer_On();
+    s_buzz_timer = lv_timer_create(buzz_off_cb, 120, NULL);
+    lv_timer_set_repeat_count(s_buzz_timer, 1);
+}
+
 static void purge_cb(lv_event_t *e)
 {
-    if (lv_event_get_code(e) != LV_EVENT_CLICKED)
-        return;
-    grind_ctrl_purge();
+    lv_event_code_t code = lv_event_get_code(e);
+
+    if (code == LV_EVENT_LONG_PRESSED) {
+        if (grind_in_progress())
+            return;
+        grind_ctrl_purge();
+    }
+    else if (code == LV_EVENT_SHORT_CLICKED && !grind_ctrl_is_purging()) {
+        /* Teach the gesture instead of firing the motor on a stray tap. */
+        show_toast("Hold to purge", COL_PRESET_BG);
+    }
 }
 
 /* 100 ms poll — reads grind controller state and updates button label */
@@ -190,28 +234,46 @@ static void grind_poll_cb(lv_timer_t *t)
     else if (state == GRIND_TARING) {
         lv_label_set_text(s_lbl_grind, "TARE");
         set_grinding_ui(true);
+        if (s_arc_progress) lv_arc_set_value(s_arc_progress, 0);
+        if (s_lbl_status)   lv_label_set_text(s_lbl_status, "taring\xe2\x80\xa6");
     }
     else if (state == GRIND_RUNNING || state == GRIND_SETTLING || state == GRIND_PULSING) {
         float w = grind_ctrl_get_weight();
-        w = (float)((int)(w * 10.0f + (w >= 0 ? 0.5f : -0.5f))) / 10.0f;
-        char buf[16];
-        if (state == GRIND_PULSING)
-            snprintf(buf, sizeof(buf), "~%.1fg", w);
-        else
-            snprintf(buf, sizeof(buf), "%.1fg", w);
+        float target = grind_ctrl_get_target();
+        char buf[24];
+        snprintf(buf, sizeof(buf), "%.1fg", w);
         lv_label_set_text(s_lbl_grind, buf);
         set_grinding_ui(true);
+
+        if (s_arc_progress) {
+            int32_t v = (target > 0.0f) ? (int32_t)(w / target * 1000.0f) : 0;
+            if (v < 0)    v = 0;
+            if (v > 1000) v = 1000;
+            lv_arc_set_value(s_arc_progress, v);
+        }
+        if (s_lbl_status) {
+            if (state == GRIND_RUNNING) {
+                snprintf(buf, sizeof(buf), "of %.1fg", target);
+                lv_label_set_text(s_lbl_status, buf);
+            } else if (state == GRIND_SETTLING) {
+                lv_label_set_text(s_lbl_status, "settling\xe2\x80\xa6");
+            } else {
+                lv_label_set_text(s_lbl_status, "topping up\xe2\x80\xa6");
+            }
+        }
     }
     else if (state == GRIND_DONE && !s_done_timer) {
         /* First poll after grind completes */
         float result = grind_ctrl_get_result();
+        float target = grind_ctrl_get_target();
         char buf[16];
         snprintf(buf, sizeof(buf), "%.1fg", result);
         lv_label_set_text(s_lbl_grind, buf);
         set_grinding_ui(false);
+        beep_done();
 
         grind_history_record(
-            s_weights[s_active], result,
+            target, result,
             grind_ctrl_get_weight_at_cutoff(),
             grind_ctrl_get_weight_before_pulses(),
             grind_ctrl_get_last_flow_rate(),
@@ -220,7 +282,7 @@ static void grind_poll_cb(lv_timer_t *t)
             (uint16_t)grind_ctrl_get_grind_ms(),
             (uint8_t)grind_ctrl_get_pulse_count()
         );
-        show_grind_toast(result, s_weights[s_active]);
+        show_grind_toast(result, target);
 
         s_done_timer = lv_timer_create(done_reset_cb, 2000, NULL);
         lv_timer_set_repeat_count(s_done_timer, 1);
@@ -235,6 +297,8 @@ static void preset_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED)
         return;
+    if (grind_in_progress())
+        return;  /* shot target is locked in; history must match it */
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
     s_active = idx;
     presets_save_nvs();
@@ -247,6 +311,8 @@ static void add_preset_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED)
         return;
+    if (grind_in_progress())
+        return;  /* leaving this screen would hide the STOP button */
     screen_preset_edit_load(-1, 18.0f);
 }
 
@@ -254,44 +320,10 @@ static void pill_longpress_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) != LV_EVENT_LONG_PRESSED)
         return;
+    if (grind_in_progress())
+        return;  /* leaving this screen would hide the STOP button */
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
     screen_preset_edit_load(idx, s_weights[idx]);
-}
-
-static void show_error_toast(const char *msg)
-{
-    if (!s_scr) return;
-
-    if (s_toast_timer) {
-        lv_timer_delete(s_toast_timer);
-        s_toast_timer = NULL;
-    }
-    if (s_toast_cont) {
-        lv_obj_delete(s_toast_cont);
-        s_toast_cont = NULL;
-    }
-
-    lv_obj_t *cont = lv_obj_create(s_scr);
-    lv_obj_set_width(cont, SCR_W - 40);
-    lv_obj_set_height(cont, LV_SIZE_CONTENT);
-    lv_obj_align(cont, LV_ALIGN_BOTTOM_MID, 0, -16);
-    lv_obj_set_style_bg_color(cont, COL_ERROR, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_bg_opa(cont, LV_OPA_90, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_border_width(cont, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_radius(cont, 12, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_pad_all(cont, 14, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_shadow_width(cont, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_remove_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t *lbl = lv_label_create(cont);
-    lv_label_set_text(lbl, msg);
-    lv_obj_set_style_text_color(lbl, lv_color_white(), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_24, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_width(lbl, SCR_W - 40 - 28);
-
-    s_toast_cont  = cont;
-    s_toast_timer = lv_timer_create(toast_dismiss_cb, 3000, NULL);
-    lv_timer_set_repeat_count(s_toast_timer, 1);
 }
 
 static void grind_cb(lv_event_t *e)
@@ -463,9 +495,13 @@ static void scr_delete_cb(lv_event_t *e)
     if (s_done_timer)      { lv_timer_delete(s_done_timer);      s_done_timer      = NULL; }
     if (s_toast_timer)     { lv_timer_delete(s_toast_timer);     s_toast_timer     = NULL; }
     if (s_update_poll)     { lv_timer_delete(s_update_poll);     s_update_poll     = NULL; }
+    if (s_buzz_timer)      { lv_timer_delete(s_buzz_timer);      s_buzz_timer      = NULL;
+                             Buzzer_Off(); }
     s_scr           = NULL;
     s_lbl_wifi      = NULL;
     s_lbl_grind     = NULL;
+    s_arc_progress  = NULL;
+    s_lbl_status    = NULL;
     s_btn_stop      = NULL;
     s_lbl_purge     = NULL;
     s_toast_cont    = NULL;  /* deleted with the screen */
@@ -479,6 +515,8 @@ static void settings_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED)
         return;
+    if (grind_in_progress())
+        return;  /* leaving this screen would hide the STOP button */
     screen_settings_load();
 }
 
@@ -486,6 +524,8 @@ static void wifi_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED)
         return;
+    if (grind_in_progress())
+        return;  /* leaving this screen would hide the STOP button */
     screen_wifi_load();
 }
 
@@ -671,6 +711,32 @@ void screen_main_load(void)
     lv_obj_remove_flag(s_sel_frame, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_flag(s_sel_frame, LV_OBJ_FLAG_SCROLLABLE);
 
+    /* ── Grind progress ring (around the GRIND button) ──────── */
+    s_arc_progress = lv_arc_create(scr);
+    lv_obj_set_size(s_arc_progress, 224, 224);
+    lv_obj_align(s_arc_progress, LV_ALIGN_CENTER, 0, 70);
+    lv_arc_set_rotation(s_arc_progress, 270);
+    lv_arc_set_bg_angles(s_arc_progress, 0, 360);
+    lv_arc_set_range(s_arc_progress, 0, 1000);
+    lv_arc_set_value(s_arc_progress, 0);
+    lv_obj_remove_style(s_arc_progress, NULL, LV_PART_KNOB);
+    lv_obj_remove_flag(s_arc_progress, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_arc_width(s_arc_progress, 10, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_arc_width(s_arc_progress, 10, LV_PART_INDICATOR | LV_STATE_DEFAULT);
+    lv_obj_set_style_arc_color(s_arc_progress, COL_SURFACE, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_arc_color(s_arc_progress, COL_ACCENT, LV_PART_INDICATOR | LV_STATE_DEFAULT);
+    lv_obj_add_flag(s_arc_progress, LV_OBJ_FLAG_HIDDEN);
+
+    /* ── Status line under the GRIND button ─────────────────── */
+    s_lbl_status = lv_label_create(scr);
+    lv_label_set_text(s_lbl_status, "");
+    lv_obj_set_style_text_font(s_lbl_status, &lv_font_montserrat_24,
+                               LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(s_lbl_status, COL_TEXT_DIM,
+                                LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_align(s_lbl_status, LV_ALIGN_CENTER, 0, 205);
+    lv_obj_add_flag(s_lbl_status, LV_OBJ_FLAG_HIDDEN);
+
     /* ── GRIND button ───────────────────────────────────────── */
     s_btn_grind = lv_button_create(scr);
     lv_obj_set_size(s_btn_grind, 180, 180);
@@ -743,7 +809,10 @@ void screen_main_load(void)
     lv_obj_set_style_border_width(btn_purge, 2, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_border_opa(btn_purge, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_shadow_width(btn_purge, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_add_event_cb(btn_purge, purge_cb, LV_EVENT_CLICKED, NULL);
+    /* Long-press to fire — a stray tap must not start the motor.
+     * A short click shows a hint toast instead. */
+    lv_obj_add_event_cb(btn_purge, purge_cb, LV_EVENT_LONG_PRESSED, NULL);
+    lv_obj_add_event_cb(btn_purge, purge_cb, LV_EVENT_SHORT_CLICKED, NULL);
 
     lv_obj_t *lbl_purge = lv_label_create(btn_purge);
     lv_label_set_text(lbl_purge, "PURGE");

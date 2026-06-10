@@ -27,10 +27,6 @@
 #define MOTOR_LATENCY_ALPHA    0.3f
 #define MOTOR_LATENCY_MIN_MS  10.0f
 #define MOTOR_LATENCY_MAX_MS 500.0f
-/* Measurement latency: half the HX711 block period
- * = (HX711_AVG_SAMPLES / HX711_POLL_HZ) * 1000 * 0.5
- * = (8 / 80) * 1000 * 0.5 = 50 ms */
-#define MEAS_LATENCY_MS       50.0f
 /* Coast must be at least this many g for the latency math to be trusted —
  * smaller readings are dominated by scale noise. */
 #define COAST_MIN_G           0.02f
@@ -51,10 +47,16 @@ static float clampf(float v, float lo, float hi)
  * Mirrors run_autotune() in grind_controller.c exactly — including the
  * per-shot AUTOTUNE_MAX_STEP_G cap that prevents a single noisy shot from
  * driving the offset to the clamp floor.
+ *
+ * NOTE: settled_g is the MAIN-STOP settled weight (weight_before_pulses),
+ * not the final result.  Pulses pull the final weight back to target, so
+ * tuning from the result would let a persistent main-stop undershoot hide
+ * inside the deadband forever; tuning from the pre-pulse weight converges
+ * the main stop itself and makes pulses the exception.
  */
-static float autotune_step(float offset, float target, float result)
+static float autotune_step(float offset, float target, float settled_g)
 {
-    float delta = result - target;
+    float delta = settled_g - target;
     if (fabsf(delta) <= AUTOTUNE_DEADBAND)
         return offset;  /* deadband: no change */
     float step = delta * AUTOTUNE_FACTOR;
@@ -105,17 +107,19 @@ static bool gate_basic(uint32_t grind_ms, float flow_g_s)
  * Returns the new motor latency (ms) after one EMA step from observed coast.
  * Mirrors the motor-latency block inside run_autotune().
  *   actual_coast_g  = weight_before_pulses - weight_at_cutoff
- *   total_latency   = actual_coast_g / flow_g_s * 1000
- *   motor_observed  = total_latency - MEAS_LATENCY_MS
- *   new_latency     = (1-α)·current + α·motor_observed   (clamped)
+ *   observed_ms     = actual_coast_g / flow_g_s * 1000
+ *   new_latency     = (1-α)·current + α·observed_ms   (clamped)
+ *
+ * The cutoff is per-sample in hx711_task now, so there is no measurement
+ * staleness to subtract — coast/flow IS the latency the stop threshold must
+ * compensate (motor spin-down + cutoff confirmation window).
  *
  * Returns the unchanged input when the coast is too small to trust.
  */
 static float motor_latency_step(float current_ms, float coast_g, float flow_g_s)
 {
     if (coast_g <= COAST_MIN_G) return current_ms;
-    float total_ms    = (coast_g / flow_g_s) * 1000.0f;
-    float observed_ms = total_ms - MEAS_LATENCY_MS;
+    float observed_ms = (coast_g / flow_g_s) * 1000.0f;
     float ema = (1.0f - MOTOR_LATENCY_ALPHA) * current_ms +
                 MOTOR_LATENCY_ALPHA * observed_ms;
     return clampf(ema, MOTOR_LATENCY_MIN_MS, MOTOR_LATENCY_MAX_MS);
@@ -235,29 +239,66 @@ void test_step_cap_protects_against_outlier(void)
 
 void test_perfect_shot_no_change(void)
 {
-    /* result == target exactly → delta == 0 → no change */
+    /* settled == target exactly → delta == 0 → no change */
     float new_off = autotune_step(0.3f, 18.0f, 18.0f);
     TEST_ASSERT_FLOAT_WITHIN(FLOAT_DELTA, 0.3f, new_off);
+}
+
+void test_pulse_masked_undershoot_still_tunes(void)
+{
+    /*
+     * The pre-fix blind spot: main stop lands at 17.5 g, pulses top the
+     * shot up to 18.0 g.  Tuning from the final result (18.0) sat inside
+     * the deadband forever, so every shot paid the pulse time penalty.
+     * Tuning from the pre-pulse settled weight (17.5) must decrease the
+     * offset so the main stop runs longer next shot.
+     * delta = -0.5 → raw step = -0.15 (at cap).
+     */
+    float new_off = autotune_step(0.3f, 18.0f, 17.5f);
+    TEST_ASSERT_LESS_THAN_FLOAT(0.3f, new_off);
+    TEST_ASSERT_FLOAT_WITHIN(FLOAT_DELTA, 0.15f, new_off);
+}
+
+void test_main_stop_convergence_eliminates_pulses(void)
+{
+    /*
+     * Closed loop on the main stop: the grinder undershoots the stop
+     * threshold's aim point by a fixed 0.4 g coast-prediction error.
+     * Tuning offset from the pre-pulse weight must converge until the
+     * main stop lands within one deadband of target — i.e. pulses stop
+     * being needed (PULSE_MIN_G < deadband would fire nothing).
+     */
+    const float target = 18.0f;
+    const float undershoot = 0.4f;
+    float offset = 0.0f;
+
+    for (int i = 0; i < 20; i++) {
+        float settled = (target - offset) - undershoot;  /* main stop result */
+        offset = autotune_step(offset, target, settled);
+    }
+
+    float final_settled = (target - offset) - undershoot;
+    TEST_ASSERT_FLOAT_WITHIN(AUTOTUNE_DEADBAND, target, final_settled);
 }
 
 /* ── Motor-latency autotune tests ─────────────────────────── */
 
 void test_motor_latency_increases_when_coast_larger(void)
 {
-    /* current=200ms, observed coast=0.6g at 2g/s → total=300ms,
-     * motor=250ms → EMA = 0.7×200 + 0.3×250 = 215 */
+    /* current=200ms, observed coast=0.6g at 2g/s → observed=300ms
+     * → EMA = 0.7×200 + 0.3×300 = 230 */
     float new_lat = motor_latency_step(200.0f, 0.6f, 2.0f);
     TEST_ASSERT_GREATER_THAN_FLOAT(200.0f, new_lat);
-    TEST_ASSERT_FLOAT_WITHIN(FLOAT_DELTA, 215.0f, new_lat);
+    TEST_ASSERT_FLOAT_WITHIN(FLOAT_DELTA, 230.0f, new_lat);
 }
 
 void test_motor_latency_decreases_when_coast_smaller(void)
 {
-    /* current=300ms, observed coast=0.3g at 2g/s → total=150ms,
-     * motor=100ms → EMA = 0.7×300 + 0.3×100 = 240 */
+    /* current=300ms, observed coast=0.3g at 2g/s → observed=150ms
+     * → EMA = 0.7×300 + 0.3×150 = 255 */
     float new_lat = motor_latency_step(300.0f, 0.3f, 2.0f);
     TEST_ASSERT_LESS_THAN_FLOAT(300.0f, new_lat);
-    TEST_ASSERT_FLOAT_WITHIN(FLOAT_DELTA, 240.0f, new_lat);
+    TEST_ASSERT_FLOAT_WITHIN(FLOAT_DELTA, 255.0f, new_lat);
 }
 
 void test_motor_latency_skipped_on_tiny_coast(void)
@@ -277,27 +318,27 @@ void test_motor_latency_skipped_on_negative_coast(void)
 
 void test_motor_latency_clamp_max(void)
 {
-    /* Pathological coast → derived motor latency would blow past 500ms;
+    /* Pathological coast → derived latency would blow past 500ms;
      * must clamp to MOTOR_LATENCY_MAX_MS */
-    float new_lat = motor_latency_step(400.0f, 2.0f, 1.0f);  /* total=2000, obs=1950 */
+    float new_lat = motor_latency_step(400.0f, 2.0f, 1.0f);  /* obs=2000 → EMA=880 */
     TEST_ASSERT_FLOAT_WITHIN(FLOAT_DELTA, MOTOR_LATENCY_MAX_MS, new_lat);
 }
 
 void test_motor_latency_clamp_min(void)
 {
-    /* observed=-45 (coast smaller than measurement latency) → EMA goes
-     * negative; must clamp to MOTOR_LATENCY_MIN_MS */
-    float new_lat = motor_latency_step(15.0f, 0.05f, 10.0f);  /* total=5, obs=-45 */
+    /* Tiny observed coast at high flow → observed=5ms pulls the EMA below
+     * the floor (0.7×10 + 0.3×5 = 8.5); must clamp to MOTOR_LATENCY_MIN_MS */
+    float new_lat = motor_latency_step(10.0f, 0.05f, 10.0f);
     TEST_ASSERT_FLOAT_WITHIN(FLOAT_DELTA, MOTOR_LATENCY_MIN_MS, new_lat);
 }
 
 void test_motor_latency_converges(void)
 {
-    /* Simulate a grinder whose true motor latency is 200ms, flow 2g/s.
-     * True coast = (200+50)/1000 × 2 = 0.5g.  Starting from a wildly wrong
+    /* Simulate a grinder whose true loop latency is 200ms, flow 2g/s.
+     * True coast = 200/1000 × 2 = 0.4g.  Starting from a wildly wrong
      * 400ms estimate, the EMA should approach 200 within 10 shots. */
     const float true_latency = 200.0f;
-    const float coast        = 0.5f;
+    const float coast        = 0.4f;
     const float flow         = 2.0f;
     float latency = 400.0f;
 
@@ -421,6 +462,8 @@ int main(void)
     RUN_TEST(test_clamp_min);
     RUN_TEST(test_convergence);
     RUN_TEST(test_perfect_shot_no_change);
+    RUN_TEST(test_pulse_masked_undershoot_still_tunes);
+    RUN_TEST(test_main_stop_convergence_eliminates_pulses);
 
     RUN_TEST(test_motor_latency_increases_when_coast_larger);
     RUN_TEST(test_motor_latency_decreases_when_coast_smaller);
