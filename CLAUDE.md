@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-**GBWUI (Grind By Weight UI)** — an ESP32-S3 embedded application for a coffee grinder controller. It monitors live weight via an HX711 load cell, controls the grinder via an SSR on GPIO43, and presents a touch UI on a 2.8" capacitive touch LCD (480×640, ST7701S, GT911 touch). UI framework is LVGL 9.x on ESP-IDF.
+**GBWUI (Grind By Weight UI)** — an ESP32-S3 embedded application for a coffee grinder controller. It monitors live weight via an HX711 load cell, controls the grinder via an SSR on GPIO4, and presents a touch UI on a 2.8" capacitive touch LCD (480×640, ST7701S, GT911 touch). UI framework is LVGL 9.x on ESP-IDF.
 
 ## Versioning
 
@@ -40,7 +40,12 @@ Host-native unit tests live in `test/` and run via `pio test -e native` — no E
 | Suite | File | What it tests |
 |-------|------|---------------|
 | `test_grind_history` | `test/test_grind_history/test_grind_history.c` | `grind_history.c` circular buffer: init, record, ordering, wrap at 50, clear, get with limit |
-| `test_autotune` | `test/test_autotune/test_autotune.c` | Auto-tune offset math: overshoot/undershoot, deadband, min/max clamp, convergence |
+| `test_autotune` | `test/test_autotune/test_autotune.c` | Auto-tune offset math (tuned from pre-pulse settled weight), motor-latency EMA, validity gates |
+| `test_flow_rate_stop` | `test/test_flow_rate_stop/test_flow_rate_stop.c` | Coast prediction / stop threshold, MAX_COAST_G cap, flow-rate EMA, per-sample cutoff confirmation |
+| `test_pulse_refinement` | `test/test_pulse_refinement/test_pulse_refinement.c` | Correction pulse gating, duration math (motor latency + productive time), fallback flow |
+| `test_grind_by_weight` | `test/test_grind_by_weight/test_grind_by_weight.c` | End-to-end demo-mode grind cycle simulation across multiple shots |
+
+Test suites mirror controller logic as pure functions (the controller can't link against LVGL/FreeRTOS on host). **When a constant or formula changes in `grind_controller.c`, update the matching mirror in the test suite.**
 
 **Test infrastructure:**
 - `test/unity/unity.h` — minimal Unity-compatible framework (header-only, no `.c` file)
@@ -85,9 +90,11 @@ Network                  →  ui/wifi_portal.c, ui/web_server.c
 GRIND_IDLE → GRIND_RUNNING → GRIND_DONE → GRIND_IDLE
 ```
 
-- `GRIND_DEMO_MODE=0` (active): real HX711 task on Core 0 at 80 Hz, atomic `volatile float` shared with LVGL poll timer
+- `GRIND_DEMO_MODE=0` (active): real HX711 task on Core 0 at 80 Hz, atomic `volatile float` shared with LVGL poll timer. The SSR cutoff fires per-sample inside `hx711_task` (3 consecutive samples ≥ stop threshold), not in the LVGL timer — the poll timer only picks up `s_cutoff_pending` to advance the state machine
 - `GRIND_DEMO_MODE=1`: simulates weight at 3 g/sec with noise (no hardware needed)
-- Auto-tune: post-grind `new_offset = clamp(offset + delta × 0.5, 0.0, 5.0)`, converges in ~3 shots
+- Auto-tune offset: tuned from the pre-pulse settled weight, `step = clamp(delta × 0.3, ±0.15)`, offset clamped to [-2.0, 5.0], 0.1 g deadband
+- Motor latency: EMA (α=0.3) of observed coast ÷ flow each valid shot; drives `coast_g = latency × flow` stop prediction
+- Pulse refinement: up to 3 correction pulses after settling; falls back to an assumed 3 g/s flow when none was measured
 
 ### FreeRTOS Tasks
 
@@ -112,7 +119,7 @@ Dual OTA setup: `ota_0` + `ota_1` (3 MB each), 16 KB NVS, 8 KB OTA data, 528 KB 
 
 - **I2C bus**: GPIO7 (SCL), GPIO15 (SDA), 400 kHz — serves GT911 touch, TCA9554 GPIO expander
 - **TCA9554** (0x20): controls backlight and buzzer via `EXIO/`
-- **HX711**: GPIO4 (DATA), GPIO44 (CLK) — real mode active (`GRIND_DEMO_MODE=0`)
-- **SSR**: GPIO43, active HIGH — UART0 TXD remapped off this pin at boot via `uart_set_pin`; monitor output via USB Serial/JTAG
+- **HX711**: GPIO44 (DATA, was UART0 RXD), GPIO43 (CLK, was UART0 TXD) — real mode active (`GRIND_DEMO_MODE=0`); UART0 detached from these pins at boot via `uart_set_pin`, monitor output via USB Serial/JTAG only
+- **SSR**: GPIO4, active HIGH
 - **GPIO33–37**: OPI-PSRAM data lines on ESP32-S3R8 — never use these as GPIO
 - Board: Waveshare ESP32-S3-Touch-LCD-2.8B

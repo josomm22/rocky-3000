@@ -13,11 +13,16 @@
 
 #include <unity.h>
 #include <math.h>
+#include <stdbool.h>
 
 /* ── Mirror of constants in grind_controller.c ────────────── */
 #define COAST_RATIO          1.0f
 #define COAST_FALLBACK_G     0.3f
+#define MAX_COAST_G          3.0f
 #define MOTOR_LATENCY_MS_DEFAULT  100.0f
+#define MAX_PLAUSIBLE_FLOW_G_S    15.0f
+#define FLOW_EMA_ALPHA       0.3f
+#define CUTOFF_CONFIRM_SAMPLES 3
 
 /* ── Replicated helpers ────────────────────────────────────── */
 
@@ -28,13 +33,45 @@ static float clampf(float v, float lo, float hi)
 
 /*
  * Compute coast distance in grams given the current flow rate and motor latency.
- * Falls back to COAST_FALLBACK_G when flow_rate is not yet established.
+ * Falls back to COAST_FALLBACK_G when flow_rate is not yet established;
+ * hard-capped at MAX_COAST_G so corrupt inputs can't cut the shot at <1 s.
  */
 static float compute_coast_g(float flow_rate_g_s, float motor_latency_ms)
 {
+    float coast = COAST_FALLBACK_G;
     if (flow_rate_g_s > 0.01f)
-        return (motor_latency_ms / 1000.0f) * flow_rate_g_s * COAST_RATIO;
-    return COAST_FALLBACK_G;
+        coast = (motor_latency_ms / 1000.0f) * flow_rate_g_s * COAST_RATIO;
+    if (coast > MAX_COAST_G)
+        coast = MAX_COAST_G;
+    return coast;
+}
+
+/*
+ * One flow-rate update as performed per block in hx711_task:
+ * clamp the raw block delta to [0, MAX_PLAUSIBLE_FLOW_G_S], then EMA it.
+ */
+static float flow_ema_step(float prev_flow, float raw_rate)
+{
+    if (raw_rate < 0.0f) raw_rate = 0.0f;
+    if (raw_rate > MAX_PLAUSIBLE_FLOW_G_S) raw_rate = MAX_PLAUSIBLE_FLOW_G_S;
+    return FLOW_EMA_ALPHA * raw_rate + (1.0f - FLOW_EMA_ALPHA) * prev_flow;
+}
+
+/*
+ * One per-sample cutoff-confirmation step as performed in hx711_task.
+ * Returns true when the SSR should be cut: CUTOFF_CONFIRM_SAMPLES
+ * consecutive samples at/above the threshold.  A sample below the
+ * threshold resets the counter.
+ */
+static bool cutoff_step(int *confirm, float sample_g, float stop_at_g)
+{
+    if (sample_g >= stop_at_g) {
+        if (++(*confirm) >= CUTOFF_CONFIRM_SAMPLES)
+            return true;
+    } else {
+        *confirm = 0;
+    }
+    return false;
 }
 
 /* Full stop threshold. */
@@ -136,6 +173,93 @@ void test_stop_at_always_less_than_target(void)
     TEST_ASSERT_LESS_THAN_FLOAT(18.0f, stop);
 }
 
+void test_coast_g_capped_at_max(void)
+{
+    /* 15 g/s (spike-gate ceiling) × 500 ms latency → raw coast 7.5 g;
+     * must cap at MAX_COAST_G so the shot can't be cut grams early. */
+    float coast = compute_coast_g(15.0f, 500.0f);
+    TEST_ASSERT_FLOAT_WITHIN(FLOAT_DELTA, MAX_COAST_G, coast);
+}
+
+/* ── Flow-rate EMA tests ──────────────────────────────────── */
+
+void test_flow_ema_negative_delta_clamps_to_zero(void)
+{
+    /* Scale settling after tare can produce negative block deltas. */
+    float f = flow_ema_step(2.0f, -1.0f);
+    TEST_ASSERT_FLOAT_WITHIN(FLOAT_DELTA, 0.7f * 2.0f, f);
+}
+
+void test_flow_ema_spike_clamped_then_smoothed(void)
+{
+    /* A 50 g/s glitch block is first clamped to 15 g/s, then the EMA
+     * only lets 30% of it through — the flow used for coast prediction
+     * moves from 2.0 to 5.9, not to 50. */
+    float f = flow_ema_step(2.0f, 50.0f);
+    TEST_ASSERT_FLOAT_WITHIN(FLOAT_DELTA, 0.3f * 15.0f + 0.7f * 2.0f, f);
+}
+
+void test_flow_ema_attenuates_single_block_noise(void)
+{
+    /* Steady 2 g/s with one ±1 g/s noisy block: the EMA moves by only
+     * 30% of the disturbance instead of passing it straight to stop_at. */
+    float up   = flow_ema_step(2.0f, 3.0f);
+    float down = flow_ema_step(2.0f, 1.0f);
+    TEST_ASSERT_FLOAT_WITHIN(FLOAT_DELTA, 2.3f, up);
+    TEST_ASSERT_FLOAT_WITHIN(FLOAT_DELTA, 1.7f, down);
+}
+
+void test_flow_ema_converges_to_steady_rate(void)
+{
+    /* From standstill, a steady 3 g/s flow must be tracked within ~1 s
+     * (10 blocks): EMA(10) = 3 × (1 - 0.7^10) ≈ 2.92. */
+    float f = 0.0f;
+    for (int i = 0; i < 10; i++)
+        f = flow_ema_step(f, 3.0f);
+    TEST_ASSERT_FLOAT_WITHIN(0.1f, 3.0f, f);
+}
+
+/* ── Cutoff-confirmation tests ────────────────────────────── */
+
+void test_cutoff_fires_after_consecutive_samples(void)
+{
+    int confirm = 0;
+    TEST_ASSERT_FALSE(cutoff_step(&confirm, 17.8f, 17.7f));
+    TEST_ASSERT_FALSE(cutoff_step(&confirm, 17.8f, 17.7f));
+    TEST_ASSERT_TRUE(cutoff_step(&confirm, 17.9f, 17.7f));
+}
+
+void test_cutoff_ignores_single_spike(void)
+{
+    /* One EMI spike above the threshold must not end the shot. */
+    int confirm = 0;
+    TEST_ASSERT_FALSE(cutoff_step(&confirm, 25.0f, 17.7f));  /* spike   */
+    TEST_ASSERT_FALSE(cutoff_step(&confirm, 12.0f, 17.7f));  /* resets  */
+    TEST_ASSERT_FALSE(cutoff_step(&confirm, 12.1f, 17.7f));
+    TEST_ASSERT_EQUAL_INT(0, confirm);
+}
+
+void test_cutoff_spike_burst_below_confirm_count_rejected(void)
+{
+    /* Even a two-sample burst (25 ms of EMI) is rejected; only a sustained
+     * crossing — real coffee on the scale — cuts the SSR. */
+    int confirm = 0;
+    TEST_ASSERT_FALSE(cutoff_step(&confirm, 25.0f, 17.7f));
+    TEST_ASSERT_FALSE(cutoff_step(&confirm, 25.0f, 17.7f));
+    TEST_ASSERT_FALSE(cutoff_step(&confirm, 12.0f, 17.7f));
+    TEST_ASSERT_EQUAL_INT(0, confirm);
+}
+
+void test_cutoff_fires_immediately_when_threshold_nonpositive(void)
+{
+    /* Tiny target + offset can push stop_at ≤ 0: the cutoff fires on the
+     * first confirmed samples and the pulse path doses the shot up. */
+    int confirm = 0;
+    TEST_ASSERT_FALSE(cutoff_step(&confirm, 0.0f, -0.1f));
+    TEST_ASSERT_FALSE(cutoff_step(&confirm, 0.0f, -0.1f));
+    TEST_ASSERT_TRUE(cutoff_step(&confirm, 0.0f, -0.1f));
+}
+
 /* ── runner ───────────────────────────────────────────────── */
 
 int main(void)
@@ -153,6 +277,17 @@ int main(void)
     RUN_TEST(test_stop_at_with_negative_bias);
     RUN_TEST(test_stop_at_fallback_when_no_flow);
     RUN_TEST(test_stop_at_always_less_than_target);
+    RUN_TEST(test_coast_g_capped_at_max);
+
+    RUN_TEST(test_flow_ema_negative_delta_clamps_to_zero);
+    RUN_TEST(test_flow_ema_spike_clamped_then_smoothed);
+    RUN_TEST(test_flow_ema_attenuates_single_block_noise);
+    RUN_TEST(test_flow_ema_converges_to_steady_rate);
+
+    RUN_TEST(test_cutoff_fires_after_consecutive_samples);
+    RUN_TEST(test_cutoff_ignores_single_spike);
+    RUN_TEST(test_cutoff_spike_burst_below_confirm_count_rejected);
+    RUN_TEST(test_cutoff_fires_immediately_when_threshold_nonpositive);
 
     return UNITY_END();
 }

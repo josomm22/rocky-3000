@@ -40,6 +40,7 @@ void grind_ctrl_stop(void);
 grind_state_t grind_ctrl_get_state(void);
 float         grind_ctrl_get_weight(void);  /* live weight, grams            */
 float         grind_ctrl_get_result(void);  /* final weight; valid when DONE */
+float         grind_ctrl_get_target(void);  /* target of current/last grind  */
 
 /* Pre-stop offset (auto-tuned after each shot). Persisted to NVS. */
 float grind_ctrl_get_offset(void);
