@@ -261,10 +261,16 @@ static const char HIST_TAIL[] =
 
 /* ── History handlers ─────────────────────────────────────────── */
 
+/* Snapshot buffer for history serialization.  The httpd task processes
+ * requests serially, so one shared static is safe — and 1.6 KB of records
+ * must NOT live on the httpd task stack: combined with newlib's float
+ * printf (~1–1.5 KB) it overflows the 4 KB default stack and panics the
+ * device the moment a history page is opened. */
+static grind_record_t s_hist_snapshot[HISTORY_MAX];
+
 static esp_err_t handle_history(httpd_req_t *req)
 {
-    grind_record_t recs[HISTORY_MAX];
-    int n = grind_history_get(recs, HISTORY_MAX);
+    int n = grind_history_get(s_hist_snapshot, HISTORY_MAX);
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_send_chunk(req, HIST_HEAD, HTTPD_RESP_USE_STRLEN);
@@ -277,11 +283,11 @@ static esp_err_t handle_history(httpd_req_t *req)
                  "%s{\"t\":%.1f,\"r\":%.1f,\"wc\":%.2f,\"wp\":%.2f"
                  ",\"f\":%.2f,\"o\":%.2f,\"ms\":%u,\"p\":%u,\"ts\":%lu}",
                  i ? "," : "",
-                 recs[i].target_g, recs[i].result_g,
-                 recs[i].weight_at_cutoff_g, recs[i].weight_before_pulses_g,
-                 recs[i].flow_g_s, recs[i].offset_g,
-                 (unsigned)recs[i].grind_ms, (unsigned)recs[i].pulse_count,
-                 (unsigned long)recs[i].timestamp);
+                 s_hist_snapshot[i].target_g, s_hist_snapshot[i].result_g,
+                 s_hist_snapshot[i].weight_at_cutoff_g, s_hist_snapshot[i].weight_before_pulses_g,
+                 s_hist_snapshot[i].flow_g_s, s_hist_snapshot[i].offset_g,
+                 (unsigned)s_hist_snapshot[i].grind_ms, (unsigned)s_hist_snapshot[i].pulse_count,
+                 (unsigned long)s_hist_snapshot[i].timestamp);
         httpd_resp_send_chunk(req, buf, HTTPD_RESP_USE_STRLEN);
     }
     httpd_resp_send_chunk(req, "]", 1);
@@ -331,8 +337,7 @@ static esp_err_t handle_history_clear(httpd_req_t *req)
 
 static esp_err_t handle_history_json(httpd_req_t *req)
 {
-    grind_record_t recs[HISTORY_MAX];
-    int n = grind_history_get(recs, HISTORY_MAX);
+    int n = grind_history_get(s_hist_snapshot, HISTORY_MAX);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
@@ -343,11 +348,11 @@ static esp_err_t handle_history_json(httpd_req_t *req)
                  "%s{\"t\":%.1f,\"r\":%.1f,\"wc\":%.2f,\"wp\":%.2f"
                  ",\"f\":%.2f,\"o\":%.2f,\"ms\":%u,\"p\":%u,\"ts\":%lu}",
                  i ? "," : "",
-                 recs[i].target_g, recs[i].result_g,
-                 recs[i].weight_at_cutoff_g, recs[i].weight_before_pulses_g,
-                 recs[i].flow_g_s, recs[i].offset_g,
-                 (unsigned)recs[i].grind_ms, (unsigned)recs[i].pulse_count,
-                 (unsigned long)recs[i].timestamp);
+                 s_hist_snapshot[i].target_g, s_hist_snapshot[i].result_g,
+                 s_hist_snapshot[i].weight_at_cutoff_g, s_hist_snapshot[i].weight_before_pulses_g,
+                 s_hist_snapshot[i].flow_g_s, s_hist_snapshot[i].offset_g,
+                 (unsigned)s_hist_snapshot[i].grind_ms, (unsigned)s_hist_snapshot[i].pulse_count,
+                 (unsigned long)s_hist_snapshot[i].timestamp);
         httpd_resp_send_chunk(req, buf, HTTPD_RESP_USE_STRLEN);
     }
     httpd_resp_send_chunk(req, "]}", HTTPD_RESP_USE_STRLEN);
@@ -797,6 +802,10 @@ void web_server_start(void)
     cfg.send_wait_timeout    = 10;
     cfg.max_uri_handlers     = 18;   /* room for portal routes + /api/tune */
     cfg.uri_match_fn         = httpd_uri_match_wildcard;
+    /* The 4 KB default leaves no headroom over newlib float printf + NVS
+     * commits running inside handlers; overflowing it panics and reboots
+     * the device on a plain page load. */
+    cfg.stack_size           = 8192;
 
     if (httpd_start(&s_server, &cfg) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start HTTP server");

@@ -100,7 +100,9 @@ void grind_history_clear(void)
 
 void grind_history_delete_indices(const int *del, int del_count)
 {
-    grind_record_t tmp[HISTORY_MAX];
+    /* Static, not stack: this runs on the HTTP server task, and 1.6 KB of
+     * records on top of the NVS-commit call chain overflows its stack. */
+    static grind_record_t tmp[HISTORY_MAX];
     int start     = (s_head - s_count + HISTORY_MAX * 2) % HISTORY_MAX;
     int new_count = 0;
 
