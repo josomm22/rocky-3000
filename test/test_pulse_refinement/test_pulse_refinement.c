@@ -25,7 +25,7 @@
 #include <stdbool.h>
 
 /* ── Mirror of constants in grind_controller.c ────────────── */
-#define PULSE_MIN_G             0.05f
+#define PULSE_MIN_G             0.2f
 #define PULSE_MAX_ATTEMPTS      3
 #define PULSE_MIN_MS            30
 #define PULSE_MAX_MS            500
@@ -147,9 +147,9 @@ void test_pulse_duration_intentional_undershoot(void)
 
 void test_pulse_duration_clamps_to_min(void)
 {
-    /* Tiny shortfall + fast flow + minimal motor latency → raw duration
-     * below PULSE_MIN_MS: 10 + (0.06/10)*1000*0.8 = 14.8 → clamp to 30 */
-    float ms = compute_pulse_ms(0.06f, 10.0f, 10.0f);
+    /* Small shortfall + fast flow + minimal motor latency → raw duration
+     * below PULSE_MIN_MS: 10 + (0.21/10)*1000*0.8 = 26.8 → clamp to 30 */
+    float ms = compute_pulse_ms(0.21f, 10.0f, 10.0f);
     TEST_ASSERT_FLOAT_WITHIN(FLOAT_DELTA, (float)PULSE_MIN_MS, ms);
 }
 
