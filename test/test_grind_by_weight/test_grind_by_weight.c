@@ -34,7 +34,7 @@
 #define AUTOTUNE_DEADBAND        0.1f
 #define OFFSET_MIN_G            -2.0f
 #define OFFSET_MAX_G             2.0f
-#define PULSE_MIN_G              0.15f
+#define PULSE_MIN_G              0.2f
 #define PULSE_MAX_ATTEMPTS       3
 #define PULSE_MIN_MS             30
 #define PULSE_MAX_MS             500
@@ -265,7 +265,7 @@ void test_no_pulse_on_default_offset(void)
  * undershoot bigger than PULSE_MIN_G.  The correction pulse must fire.
  *
  * With offset=0.5 the settled weight is target - 0.5 + 0.18 = 17.68 g
- * (shortfall 0.32 g > PULSE_MIN_G 0.15 g).
+ * (shortfall 0.32 g > PULSE_MIN_G 0.2 g).
  */
 void test_pulse_fires_on_aggressive_offset(void)
 {

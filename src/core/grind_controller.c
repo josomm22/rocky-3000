@@ -127,7 +127,7 @@ static void load_settings(void);
 #define MAX_GRIND_MS 60000
 
 /* Pulse refinement: short correction bursts after the main stop */
-#define PULSE_MIN_G 0.05f    /* below this shortfall → skip pulse      */
+#define PULSE_MIN_G 0.2f     /* shortfall ≤ this → skip pulse; close enough */
 #define PULSE_MAX_ATTEMPTS 3 /* safety cap on correction loops         */
 #define PULSE_MIN_MS 30      /* shortest meaningful SSR pulse (ms)     */
 #define PULSE_MAX_MS 500     /* safety cap (ms)                        */
@@ -451,8 +451,9 @@ static lv_timer_t *s_timer = NULL;
 /* Settle tick counter (counts up after SSR cutoff).
  * Real mode: advance until is_settled() or SETTLE_TIMEOUT_TICKS.
  * Demo mode: use SETTLE_FIXED_TICKS as a simple fixed delay. */
-#define SETTLE_TIMEOUT_TICKS 15    /* 15 × 100 ms = 1.5 s max wait (real)              */
+#define SETTLE_TIMEOUT_TICKS 30    /* 30 × 100 ms = 3 s max wait (real)                */
 #define SETTLE_FIXED_TICKS 2       /* 2 × 100 ms = 200 ms fixed (demo)                 */
+#define MAIN_SETTLE_MIN_TICKS 8    /* 8 × 100 ms = 0.8 s minimum post-main-stop settle */
 #define PULSE_SETTLE_MIN_TICKS 12  /* 12 × 100 ms = 1.2 s minimum post-pulse settle    */
 static int s_settle_ticks = 0;
 
@@ -729,11 +730,14 @@ static void poll_cb(lv_timer_t *t)
         s_weight = (float)s_latest_weight;
         if (s_weight < 0.0f) s_weight = 0.0f;
         s_settle_ticks++;
-        /* After a correction pulse, wait longer before re-evaluating — the
-         * grinder coasts for ~250 ms and the scale needs time to stabilise.
-         * After the main stop, 2 ticks (200 ms) is enough to prime the
-         * settle buffer; the std-dev gate does the rest. */
-        int min_ticks = (s_pulse_attempts > 0) ? PULSE_SETTLE_MIN_TICKS : 2;
+        /* Minimum waits before the std-dev gate may end settling: after a
+         * correction pulse the grinder coasts ~250 ms and the scale needs
+         * time to stabilise; after the main stop we wait even though the
+         * settle buffer was invalidated at cutoff — the pre-pulse weight
+         * feeds offset autotune and the pulse decision, so grabbing it
+         * while coffee is still falling corrupts both. */
+        int min_ticks = (s_pulse_attempts > 0) ? PULSE_SETTLE_MIN_TICKS
+                                               : MAIN_SETTLE_MIN_TICKS;
         if (s_settle_ticks >= min_ticks &&
             (is_settled() || s_settle_ticks >= SETTLE_TIMEOUT_TICKS))
             settle_complete();
@@ -812,6 +816,14 @@ static void poll_cb(lv_timer_t *t)
         s_grind_ms = lv_tick_get() - s_grind_start_ms;
         s_pulse_attempts = 0;
         s_settle_ticks = 0;
+
+        /* Invalidate the settle buffer: it still holds mid-grind readings,
+         * which would let is_settled() fire while coffee is coasting onto
+         * the scale.  The settled weight captured next feeds offset autotune
+         * and the pulse decision — it must be a genuinely settled value. */
+        s_settle_buf_full = false;
+        s_settle_buf_idx = 0;
+
         s_state = GRIND_SETTLING;
         return;
     }
