@@ -122,3 +122,5 @@ bool grind_ctrl_is_purging(void);
  * when this returns false.
  */
 bool grind_ctrl_hx711_healthy(void);
+/* Last shot was aborted because readings failed or weight stopped rising. */
+bool grind_ctrl_scale_fault(void);

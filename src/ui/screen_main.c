@@ -282,7 +282,10 @@ static void grind_poll_cb(lv_timer_t *t)
             (uint16_t)grind_ctrl_get_grind_ms(),
             (uint8_t)grind_ctrl_get_pulse_count()
         );
-        show_grind_toast(result, target);
+        if (grind_ctrl_scale_fault())
+            show_error_toast("Stopped: check scale\nNo weight progress / sensor fault");
+        else
+            show_grind_toast(result, target);
 
         s_done_timer = lv_timer_create(done_reset_cb, 2000, NULL);
         lv_timer_set_repeat_count(s_done_timer, 1);

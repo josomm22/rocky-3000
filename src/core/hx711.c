@@ -17,6 +17,7 @@
 static gpio_num_t s_dout;
 static gpio_num_t s_pd_sck;
 static int32_t    s_tare_offset = 0;
+static portMUX_TYPE s_clock_mux = portMUX_INITIALIZER_UNLOCKED;
 
 void hx711_init(gpio_num_t dout, gpio_num_t pd_sck)
 {
@@ -47,6 +48,10 @@ static int32_t read_raw(void)
 {
     uint32_t raw = 0;
 
+    /* A preemption while SCK is high can turn a read pulse into a
+     * power-down pulse (see hx711_power_cycle). Protect all 25 pulses,
+     * including gain selection, and leave SCK low before unlocking. */
+    taskENTER_CRITICAL(&s_clock_mux);
     for (int i = 0; i < 24; i++) {
         gpio_set_level(s_pd_sck, 1);
         esp_rom_delay_us(1);
@@ -60,6 +65,7 @@ static int32_t read_raw(void)
     esp_rom_delay_us(1);
     gpio_set_level(s_pd_sck, 0);
     esp_rom_delay_us(1);
+    taskEXIT_CRITICAL(&s_clock_mux);
 
     /* Sign-extend from 24-bit two's complement */
     if (raw & 0x800000u)
