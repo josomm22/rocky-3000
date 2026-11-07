@@ -25,6 +25,7 @@
  */
 
 #include "grind_controller.h"
+#include "weight_progress.h"
 #include "lvgl.h"
 #include "nvs_flash.h"
 #include "nvs.h"
@@ -234,6 +235,9 @@ static volatile bool  s_cutoff_pending = false;
 static volatile float s_cutoff_weight  = 0.0f; /* sample that confirmed cutoff */
 static volatile float s_cutoff_flow    = 0.0f; /* smoothed flow at cutoff      */
 static volatile float s_stop_at_g      = 0.0f; /* refreshed each block         */
+/* Latched until the next shot; recovery must never resume an aborted shot. */
+static volatile bool s_sensor_fault = false;
+static weight_progress_t s_progress;
 
 static void hx711_task(void *arg)
 {
@@ -249,17 +253,18 @@ static void hx711_task(void *arg)
     /* Prime the EMA with the first valid reading so it doesn't
      * crawl up from 0.0 on startup. */
     float g;
-    if (hx711_wait_ready(HX711_READY_TIMEOUT_MS) && hx711_read_grams(s_cal_factor, &g))
+    if (hx711_wait_ready(HX711_READY_TIMEOUT_MS) && hx711_read_grams(s_cal_factor, &g)) {
         s_latest_weight = g;
-
-    s_hx711_last_ok_tick = xTaskGetTickCount();
-    s_hx711_healthy = true;
+        s_hx711_last_ok_tick = xTaskGetTickCount();
+        s_hx711_healthy = true;
+    }
 
     while (1)
     {
         if (s_tare_requested)
         {
             s_tare_complete = false;
+            s_hx711_healthy = false; /* require a fresh post-tare block */
             if (hx711_tare()) {
                 s_latest_weight = 0.0f;
                 s_tare_complete = true;
@@ -326,6 +331,10 @@ static void hx711_task(void *arg)
 
         if (!block_ok)
         {
+            /* Cut power before attempting recovery, even if the UI is busy. */
+            s_sensor_fault = true;
+            s_cutoff_armed = false;
+            ssr_set(0);
             /* HX711 is not responding — attempt power-cycle recovery. */
             s_hx711_healthy = false;
             for (int retry = 0; retry < HX711_MAX_RETRIES; retry++)
@@ -334,12 +343,8 @@ static void hx711_task(void *arg)
                 vTaskDelay(pdMS_TO_TICKS(200));
                 if (hx711_wait_ready(HX711_READY_TIMEOUT_MS))
                 {
-                    /* Sensor is back — re-tare to get a clean baseline. */
-                    if (hx711_tare()) {
-                        s_latest_weight = 0.0f;
-                        s_hx711_last_ok_tick = xTaskGetTickCount();
-                        s_hx711_healthy = true;
-                    }
+                    /* Preserve the existing zero: coffee may be on the scale.
+                     * A new shot explicitly tares before starting the motor. */
                     break;
                 }
             }
@@ -363,6 +368,8 @@ static void hx711_task(void *arg)
                 || fabsf(avg - s_latest_weight) < SPIKE_REJECT_DELTA_G)
             {
                 s_latest_weight = HX711_EMA_ALPHA * avg + (1.0f - HX711_EMA_ALPHA) * s_latest_weight;
+                s_hx711_last_ok_tick = xTaskGetTickCount();
+                s_hx711_healthy = true;
 
                 /* Flow rate: weight delta over the fixed block period.
                  * Block period = HX711_AVG_SAMPLES / HX711_POLL_HZ (seconds).
@@ -404,10 +411,7 @@ static void hx711_task(void *arg)
                     s_stop_at_g = s_target - coast_g - s_offset;
                 }
             }
-            /* else: spike detected — keep previous weight and flow rate */
-
-            s_hx711_last_ok_tick = xTaskGetTickCount();
-            s_hx711_healthy = true;
+            /* Rejected blocks must not refresh measurement health. */
         }
     }
 }
@@ -719,6 +723,26 @@ static void settle_complete(void)
 static void poll_cb(lv_timer_t *t)
 {
     (void)t;
+#if !GRIND_DEMO_MODE
+    if ((s_state == GRIND_RUNNING || s_state == GRIND_SETTLING ||
+         s_state == GRIND_PULSING) &&
+        (s_sensor_fault || !grind_ctrl_hx711_healthy()))
+    {
+        s_sensor_fault = true;
+        grind_ctrl_stop();
+        return;
+    }
+    if (s_state == GRIND_RUNNING)
+    {
+        uint32_t now = lv_tick_get();
+        if (weight_progress_expired(&s_progress, s_latest_weight, now))
+        {
+            s_sensor_fault = true;
+            grind_ctrl_stop();
+            return;
+        }
+    }
+#endif
 
     /* ── GRIND_SETTLING: wait for scale to stabilise ── */
     if (s_state == GRIND_SETTLING)
@@ -857,7 +881,11 @@ static void tare_done_cb(lv_timer_t *t)
     if (s_state != GRIND_TARING)
         return;
 
-    if (!s_tare_complete)
+    if (!s_tare_complete
+#if !GRIND_DEMO_MODE
+        || !grind_ctrl_hx711_healthy()
+#endif
+       )
     {
         /* Tare hasn't finished yet — reschedule unless we've exceeded
          * the overall timeout. */
@@ -873,6 +901,17 @@ static void tare_done_cb(lv_timer_t *t)
         lv_timer_pause(s_timer);
         return;
     }
+
+#if !GRIND_DEMO_MODE
+    if (!grind_ctrl_hx711_healthy() || s_sensor_fault)
+    {
+        s_state = GRIND_IDLE;
+        lv_timer_pause(s_timer);
+        return;
+    }
+    s_progress.weight = 0.0f;
+    s_progress.last_progress_ms = lv_tick_get();
+#endif
 
     s_state = GRIND_RUNNING;
     ssr_set(1);
@@ -931,7 +970,7 @@ void grind_ctrl_start(float target_g)
 
 #if !GRIND_DEMO_MODE
     /* Refuse to start if the HX711 hasn't produced a fresh reading recently. */
-    if (!s_hx711_healthy)
+    if (!grind_ctrl_hx711_healthy())
         return;
 #endif
 
@@ -950,6 +989,7 @@ void grind_ctrl_start(float target_g)
 #if !GRIND_DEMO_MODE
     s_cutoff_armed         = false;
     s_cutoff_pending       = false;
+    s_sensor_fault         = false;
 #endif
     s_tare_start_ms        = lv_tick_get();
     s_state = GRIND_TARING;
@@ -1129,6 +1169,17 @@ bool grind_ctrl_hx711_healthy(void)
 #if GRIND_DEMO_MODE
     return true;
 #else
-    return s_hx711_healthy;
+    return s_hx711_healthy &&
+           (TickType_t)(xTaskGetTickCount() - s_hx711_last_ok_tick)
+               < pdMS_TO_TICKS(HX711_HEALTH_TIMEOUT_MS);
+#endif
+}
+
+bool grind_ctrl_scale_fault(void)
+{
+#if GRIND_DEMO_MODE
+    return false;
+#else
+    return s_sensor_fault;
 #endif
 }
